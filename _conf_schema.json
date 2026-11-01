@@ -1,0 +1,174 @@
+{
+  "enabled": {
+    "type": "bool",
+    "description": "总开关",
+    "default": true,
+    "hint": "关闭后不心跳、不注入、不主动说话，已有数据保留。"
+  },
+  "perception": {
+    "type": "object",
+    "description": "🫀 情绪感知",
+    "items": {
+      "owner_ids": {
+        "description": "谁能影响她的心（QQ 号）",
+        "type": "list",
+        "default": [],
+        "hint": "留空则自动从「目标会话」末段取。私聊和群聊都按它判定：名单外的人只能让气氛热闹，改变不了依恋/亲密/责怪/期待。"
+      },
+      "outsider_effect": {
+        "description": "群里别人说话的影响",
+        "type": "string",
+        "default": "social_joy_only",
+        "options": [
+          "social_joy_only",
+          "none"
+        ],
+        "labels": [
+          "只加热闹（社交+2、喜悦+1）",
+          "完全忽略"
+        ],
+        "hint": "两种都不会碰依恋/亲密/压力/责怪/期待，也不会解除「等他回我」的等待态。"
+      }
+    }
+  },
+  "proactive": {
+    "type": "object",
+    "description": "💬 主动说话",
+    "items": {
+      "enabled": {
+        "type": "bool",
+        "description": "允许她主动开口",
+        "default": true
+      },
+      "target_umo": {
+        "type": "string",
+        "description": "发往哪个会话（UMO）",
+        "default": "",
+        "hint": "留空 = 自动记住最近跟她说话的会话。在目标会话里发 /心 umo 可查。"
+      },
+      "cooldown_hours": {
+        "type": "float",
+        "description": "最小间隔（小时）",
+        "default": 6.0,
+        "hint": "两次主动说话之间至少隔这么久。"
+      },
+      "daily_limit": {
+        "type": "int",
+        "description": "每天最多几次",
+        "default": 4
+      },
+      "min_idle_minutes": {
+        "type": "int",
+        "description": "你刚说完话多久内不打扰（分钟）",
+        "default": 10,
+        "hint": "只按私聊算，群里别人聊天不会推迟她找你。"
+      },
+      "quiet_hours": {
+        "type": "string",
+        "description": "睡眠时段",
+        "default": "01:30-07:30",
+        "hint": "HH:MM-HH:MM，可跨零点，留空不限制。这段时间里她不会主动说话，开机补发也遵守。"
+      },
+      "catch_up_on_start": {
+        "type": "bool",
+        "description": "启动时补发错过的消息",
+        "default": true,
+        "hint": "同样受冷却、日限、睡眠时段和「回避」状态约束。"
+      },
+      "segment_reply": {
+        "type": "bool",
+        "description": "多句时拆成几条发",
+        "default": true,
+        "hint": "按句末标点切 2–4 条，条间隔 0.8–3.5 秒。切不出多段就原样一条发。"
+      }
+    }
+  },
+  "channel": {
+    "type": "object",
+    "description": "⚖️ 渠道权重（私聊 vs 群聊）",
+    "items": {
+      "group_base_weight": {
+        "type": "float",
+        "description": "群里说话的基础权重",
+        "default": 0.35,
+        "hint": "私聊固定 1.0。实际值还随「距上次私聊时长」衰减：<6h ×1.0、<24h ×0.7、<72h ×0.45、≥72h ×0.25。"
+      },
+      "negative_multiplier": {
+        "type": "float",
+        "description": "负向事件在群里的倍率",
+        "default": 1.2,
+        "hint": "被凶 / 被敷衍在群里不打折，反而加重。"
+      }
+    }
+  },
+  "thought": {
+    "type": "object",
+    "description": "💭 念头",
+    "items": {
+      "enabled": {
+        "type": "bool",
+        "description": "生成并跟踪念头",
+        "default": true,
+        "hint": "关掉后退回固定念头池，其余功能不受影响。"
+      },
+      "min_weight": {
+        "type": "float",
+        "description": "念头入池门槛",
+        "default": 0.2,
+        "hint": "维度高出基线多少才凝成念头，调低更爱冒小念头。"
+      },
+      "ttl_hours": {
+        "type": "float",
+        "description": "念头软过期（小时）",
+        "default": 24.0,
+        "hint": "过期后不再注入，但仍保留 3 倍时长才真正删除。"
+      },
+      "proactive_push": {
+        "type": "float",
+        "description": "有念头时开口的概率加成",
+        "default": 0.15
+      }
+    }
+  },
+  "tick": {
+    "type": "object",
+    "description": "💓 心跳",
+    "items": {
+      "base_interval_minutes": {
+        "type": "int",
+        "description": "常规心跳间隔（分钟）",
+        "default": 45
+      },
+      "min_interval_minutes": {
+        "type": "int",
+        "description": "最短心跳间隔（分钟）",
+        "default": 15,
+        "hint": "压力 / 责怪越高心跳越快，下限由此决定。"
+      }
+    }
+  },
+  "inject": {
+    "type": "object",
+    "description": "🧠 心境注入",
+    "items": {
+      "enabled": {
+        "type": "bool",
+        "description": "把心境写进系统提示词",
+        "default": true,
+        "hint": "固定最后执行，只追加到末尾，不覆盖记忆插件与 TTS 的内容。"
+      },
+      "min_gap_minutes": {
+        "type": "int",
+        "description": "两次注入的最小间隔（分钟）",
+        "default": 20,
+        "hint": "即使状态变了，也至少隔这么久才再注入一次。"
+      }
+    }
+  },
+  "debug": {
+    "type": "bool",
+    "description": "调试日志",
+    "default": false,
+    "hint": "打开后每次心跳 / 注入 / 主动说话都写一条日志。"
+  }
+}
