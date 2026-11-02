@@ -109,24 +109,19 @@
         "type": "bool",
         "description": "生成并跟踪念头",
         "default": true,
-        "hint": "关掉后退回固定念头池，其余功能不受影响。"
+        "hint": "关掉后不再生成新念头，已有的照常过期；心境与主动说话不受影响。"
       },
       "min_weight": {
         "type": "float",
         "description": "念头入池门槛",
         "default": 0.2,
-        "hint": "维度高出基线多少才凝成念头，调低更爱冒小念头。"
-      },
-      "ttl_hours": {
-        "type": "float",
-        "description": "念头软过期（小时）",
-        "default": 24.0,
-        "hint": "过期后不再注入，但仍保留 3 倍时长才真正删除。"
+        "hint": "触发强度低于它的念头不会冒出来。范围 0–1.2：默认 0.2 等于全放行，调到 1.0 只留强烈的，超过 1.2 就再也不生成念头。"
       },
       "proactive_push": {
         "type": "float",
         "description": "有念头时开口的概率加成",
-        "default": 0.15
+        "default": 0.15,
+        "hint": "直接加到开口概率上（加法）。基础 15% 的场合，0.15 会变成 30%。"
       }
     }
   },

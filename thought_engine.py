@@ -204,15 +204,21 @@ def pick_kind(
     awaiting_reply: bool,
     exclude: tuple[str, ...] = (),
     rng: random.Random | None = None,
+    min_weight: float = 0.0,
 ) -> tuple[str | None, float]:
-    """按当下驱动状态加权抽一个念头；全都够不着时返回 (None, 0)。"""
+    """按当下驱动状态加权抽一个念头；全都够不着时返回 (None, 0)。
+
+    min_weight 是"入池门槛"：触发强度低于它的念头不参与抽取。
+    各类型的触发强度落在 0–1.2，所以默认 0.2 等于全放行。
+    """
     rng = rng or random
+    floor = float(min_weight or 0.0)
     cands: list[tuple[str, float]] = []
     for kind, meta in KIND_META.items():
         if kind in exclude:
             continue
         w = float(meta["trigger"](drives, expectation, awaiting_reply))
-        if w > 0:
+        if w > 0 and w >= floor:
             cands.append((kind, w))
     if not cands:
         return None, 0.0

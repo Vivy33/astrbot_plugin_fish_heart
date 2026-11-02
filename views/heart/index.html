@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>鱼的心</title>
+<link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+<div class="aurora" aria-hidden="true"><i></i><i></i><i></i></div>
+
+<section class="hero">
+  <header class="topbar">
+    <div class="brand">
+      <div class="heart" aria-hidden="true">
+        <svg viewBox="0 0 32 32">
+          <path d="M16 27.2s-9.8-5.9-12.6-11.6C1.5 11.4 3.4 6.3 8 5.5c2.9-.5 5.6 1.1 7.1 3.5 1.5-2.4 4.2-4 7.1-3.5 4.6.8 6.5 5.9 4.6 10.1C24 21.3 16 27.2 16 27.2z"/>
+        </svg>
+      </div>
+      <div class="brand-text">
+        <h1>鱼的心</h1>
+        <p class="sub" id="subtitle">正在读取她的心境…</p>
+      </div>
+    </div>
+    <div class="topbar-right">
+      <span class="badge" id="modeBadge" data-mode="calm">—</span>
+      <button class="ghost-btn" id="btnRefresh" type="button">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 2v3h-3" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        刷新
+      </button>
+    </div>
+  </header>
+</section>
+
+<section class="error-card" id="errorCard" hidden>
+  <h2>读不到她的状态</h2>
+  <p id="errorText"></p>
+  <button class="ghost-btn" id="btnRetry" type="button">重试</button>
+</section>
+
+<main class="grid" id="grid" hidden>
+  <section class="card card-radar">
+    <div class="card-head"><h2>九维驱动</h2><span class="hint">越靠外越强</span></div>
+    <div class="radar-wrap">
+      <svg class="radar" id="radar" viewBox="0 0 340 340" role="img" aria-label="九维驱动雷达图"></svg>
+    </div>
+    <div class="legend" id="radarLegend"></div>
+  </section>
+
+  <section class="card card-vitals">
+    <div class="card-head"><h2>此刻</h2><span class="hint" id="tickHint">心跳 —</span></div>
+    <div class="rings" id="rings"></div>
+    <div class="meters" id="meters"></div>
+    <p class="tendency" id="tendency" hidden><b>倾向</b><span id="tendencyText"></span></p>
+  </section>
+
+  <section class="card card-thoughts">
+    <div class="card-head"><h2>心头的念头</h2><span class="hint" id="thoughtCount">0 条</span></div>
+    <ul class="thought-list" id="thoughtList"></ul>
+    <p class="empty" id="thoughtEmpty">她这会儿什么都没惦记。</p>
+  </section>
+
+  <section class="card card-proactive">
+    <div class="card-head"><h2>主动说话</h2><span class="hint" id="proactiveHint">—</span></div>
+    <div class="stats">
+      <div class="stat"><span>今日已开口</span><b id="pCount">0</b></div>
+      <div class="stat"><span>冷却剩余</span><b id="pCooldown">—</b></div>
+      <div class="stat"><span>上次开口</span><b id="pLast">从未</b></div>
+      <div class="stat"><span>等你回</span><b id="pWaiting">否</b></div>
+    </div>
+    <div class="chips" id="chips"></div>
+    <p class="readiness" id="readiness"></p>
+    <button class="primary-btn" id="btnTick" type="button">替她跳一次心跳</button>
+  </section>
+
+  <section class="card card-recent">
+    <div class="card-head"><h2>最近说过的话</h2><span class="hint" id="recentHint">只记私聊</span></div>
+    <ol class="timeline" id="recent"></ol>
+    <p class="empty" id="recentEmpty">还没有最近的对话。</p>
+  </section>
+
+  <section class="card card-inject">
+    <div class="card-head"><h2>心境报到簿</h2><span class="hint">哪些会话看过当前心境</span></div>
+    <ul class="inject-list" id="injectList"></ul>
+    <p class="empty" id="injectEmpty">还没有会话报到过 —— 去私聊跟她说一句话，她注入心境后这里就会记下是哪个会话、什么时候。</p>
+  </section>
+</main>
+
+<div class="toast" id="toast" hidden></div>
+<script src="./app.js"></script>
+</body>
+</html>

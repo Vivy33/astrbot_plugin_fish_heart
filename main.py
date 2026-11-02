@@ -80,7 +80,7 @@ def _thought_summary(thoughts: list) -> list:
 
 
 PLUGIN_NAME = "astrbot_plugin_fish_heart"
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 
 # 注入钩子优先级：AstrBot 按优先级 **降序** 执行。
 # 天使之心 = 40，TTS = 0，这里用 -10 表示最后一个执行（只追加、不覆盖）。
@@ -236,9 +236,10 @@ KIND_DESC = {
 }
 
 # LLM 不可用时的兜底台词（保证不会一声不吭）
+# 注意：这里只用「任何时段都成立」的话，别写"我先睡了"这类带时间的前提
 FALLBACK_LINES = {
-    KIND_LONGING: ("在忙吗", "你还在吗", "我突然有点想你"),
-    KIND_WAITING: ("你是不是很忙啊", "等你半天了", "我先睡了哦"),
+    KIND_LONGING: ("在忙吗", "醒了吗", "我突然有点想你"),
+    KIND_WAITING: ("你是不是很忙啊", "今天怎么样", "半天没动静了"),
     KIND_WHIM: ("刚刚看到个东西，想到你了", "今天天气挺好的", "没什么事，就是想说一句"),
 }
 
@@ -329,6 +330,26 @@ def new_state() -> dict:
 
 def now_day() -> str:
     return datetime.now().strftime("%Y-%m-%d")
+
+
+# 与 AstrBot 内置「现实世界时间感知」同一套星期格式
+_WEEKDAY_EN = (
+    "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday",
+)
+
+
+def fmt_gap(seconds: float) -> str:
+    """把时间差说成人话：37 分钟前 / 6 小时 25 分前 / 1 天 3 小时前。"""
+    m = int(max(0.0, seconds) // 60)
+    if m < 1:
+        return "刚刚"
+    if m < 60:
+        return f"{m} 分钟前"
+    h, rem = divmod(m, 60)
+    if h < 24:
+        return f"{h} 小时 {rem} 分前"
+    d, rem_h = divmod(h, 24)
+    return f"{d} 天 {rem_h} 小时前"
 
 
 # --------------------------------------------------------------------------- #
@@ -693,6 +714,8 @@ class EmotionCore(Star):
     def _spawn_thought(self) -> None:
         if not engine:
             return
+        if not self._cfg("thought.enabled", True):
+            return
         st = self.state
         now = time.time()
         live = [t for t in st.get("thoughts", []) if float(t.get("expires", 0)) > now]
@@ -704,6 +727,7 @@ class EmotionCore(Star):
             float(st.get("expectation", 0.0)),
             bool(st.get("awaiting_reply")),
             exclude=exclude,
+            min_weight=float(self._cfg("thought.min_weight", 0.2)),
         )
         if not kind:
             return
@@ -1144,7 +1168,15 @@ class EmotionCore(Star):
         if kind == KIND_WHIM:
             p *= 0.6          # 念头型更随机
         if _pending_hint(st.get("thoughts") or []):
-            p = min(0.75, p * 1.3)   # 心里惦记着事，更容易开口
+            # 有念头时按配置加成（加法，而不是原来硬编码的 ×1.3）
+            push = max(0.0, float(self._cfg("thought.proactive_push", 0.15)))
+            p = min(0.85, p + push)
+        # 沉默越久越忍不住：12 小时起步线性加成，最多 ×2.5，总上限 0.85
+        silent_h = max(
+            0.0,
+            (time.time() - float(st.get("last_proactive", 0) or 0)) / 3600.0,
+        )
+        p = min(0.85, p * (1.0 + min(1.5, silent_h / 12.0)))
         return kind, p
 
     # ---------------- 真实对话历史（读 / 写） ----------------
@@ -1250,7 +1282,30 @@ class EmotionCore(Star):
         if inj:
             blocks.append(inj)
 
-        thought = _pending_hint(self.state.get("thoughts") or [])
+        st = self.state
+        now = datetime.now().astimezone()
+
+        # 时间锚点：跟 AstrBot 内置的时间感知同一套格式（<system_reminder> + Current datetime）
+        # 主动说话没有用户消息，模型推不出"上一次说话多久以前"，所以把这两个时间点摆明
+        his_last = float(st.get("last_private_msg", 0) or 0)
+        her_last = float(st.get("last_proactive", 0) or 0)
+        reminder = (
+            f"Current datetime: {now:%Y-%m-%d %H:%M} ({now.tzname() or 'local'}), "
+            f"Weekday: {_WEEKDAY_EN[now.weekday()]}"
+        )
+        if his_last > 0:
+            prev = datetime.fromtimestamp(his_last)
+            reminder += (
+                f"\n他上一次说话是 {fmt_gap(time.time() - his_last)}（{prev:%H:%M}）。"
+            )
+        if her_last > his_last:
+            reminder += (
+                f"\n你在他之后已经主动给他发过消息了（最近一次 {fmt_gap(time.time() - her_last)}），"
+                "他一直没回。你自己的话在下面的记录里。"
+            )
+        time_block = f"<system_reminder>\n{reminder}\n</system_reminder>\n"
+
+        thought = _pending_hint(st.get("thoughts") or [])
         if thought:
             blocks.append(f"你现在心里惦记着：{thought}。说的时候自然带一点，但别直接复述这句话。")
 
@@ -1258,14 +1313,18 @@ class EmotionCore(Star):
         transcript = await self._real_transcript(umo, limit=10)
         if not transcript:
             transcript = self._recent_transcript(limit=8)
+        tr_block = ("最近对话：\n" + transcript + "\n") if transcript else ""
+
         prompt = (
-            f"{KIND_DESC.get(kind, '你想跟他说一句')}。\n"
-            f"{('最近对话：\n' + transcript + '\n') if transcript else ''}"
-            "现在写一条要发出去的消息：\n"
-            "- 一句话，口语，最多 20 个字\n"
-            "- 不要解释你在做什么，不要写动作括号，不要用引号\n"
-            "- 不要连续追问，最多一个问号\n"
-            "直接输出这句话本身。"
+            time_block
+            + KIND_DESC.get(kind, "你想跟他说一句")
+            + "。\n"
+            + tr_block
+            + "现在写一条要发出去的消息：\n"
+            + "- 一句话，口语，最多 20 个字\n"
+            + "- 不要解释你在做什么，不要写动作括号，不要用引号\n"
+            + "- 不要连续追问，最多一个问号\n"
+            + "直接输出这句话本身。"
         )
         try:
             provider = self.context.get_using_provider(umo)
@@ -1285,15 +1344,26 @@ class EmotionCore(Star):
         return random.choice(FALLBACK_LINES.get(kind, FALLBACK_LINES[KIND_WHIM]))
 
     async def _persona_system_prompt(self, umo: str) -> str:
+        """给主动说话用的 system prompt。
+
+        永远以**当前人设**为准：缓存里那份是 AstrBot 组装好的完整 system prompt，
+        多出来的多半是命令行/联网引用这类工具说明，对一句主动消息没用，
+        还会引入"缓存过期、不含新改的人设"这类坑。所以缓存只当最后兜底。
+        """
+        persona_prompt = ""
         try:
             pm = getattr(self.context, "persona_manager", None)
             if pm is not None:
                 persona = await pm.get_default_persona_v3(umo)
-                sp = getattr(persona, "system_prompt", "") or ""
-                if sp:
-                    return sp
+                # Personality 是 TypedDict，运行时就是 dict，字段名是 prompt 不是 system_prompt
+                if isinstance(persona, dict):
+                    persona_prompt = str(persona.get("prompt") or "")
+                else:
+                    persona_prompt = str(getattr(persona, "prompt", "") or "")
         except Exception as e:
             self._dbg("取人设失败: %s", e)
+        if persona_prompt:
+            return persona_prompt
         return self._persona_cache.get(umo, "")
 
     def _recent_transcript(self, limit: int = 8) -> str:
@@ -1304,7 +1374,7 @@ class EmotionCore(Star):
             t = str(r.get("t", "")).replace("\n", " ")
             if t:
                 out.append(f"{who}：{t}")
-        return "\n".join(out)
+        return "\n".join(out[-limit:])
 
     def _push_recent(self, role: str, text: str) -> None:
         if not text:
@@ -1406,6 +1476,8 @@ class EmotionCore(Star):
             if not text:
                 return
             self._push_recent("bot", text[:200])
+            # 她的普通回复也算"说过话"，用于主动说话时算时间差
+            self.state["last_assistant_msg"] = time.time()
             self._save_state()
         except Exception as e:
             logger.warning("[鱼的心] on_llm_response 异常: %s", e)
@@ -1566,12 +1638,21 @@ class EmotionCore(Star):
             logger.warning("[鱼的心] 页面读取状态失败: %s", e)
             return {"ok": False, "error": str(e), "data": {}}
 
+    async def _manual_tick(self) -> bool:
+        """手动跳一次心跳，并真的掷一次骰子——可能会立刻开口。"""
+        before = int(self.state.get("proactive_count", 0))
+        self._tick()
+        self.state["last_tick"] = time.time()
+        self._save_state()
+        await self._maybe_proactive()
+        return int(self.state.get("proactive_count", 0)) > before
+
     async def _web_tick(self, **kwargs) -> dict:
         try:
-            self._tick()
-            self.state["last_tick"] = time.time()
-            self._save_state()
-            return {"ok": True, "data": self._state_payload()}
+            sent = await self._manual_tick()
+            payload = self._state_payload()
+            payload["just_sent"] = sent
+            return {"ok": True, "data": payload}
         except Exception as e:
             logger.warning("[鱼的心] 页面手动心跳失败: %s", e)
             return {"ok": False, "error": str(e), "data": {}}
@@ -1594,10 +1675,9 @@ class EmotionCore(Star):
             yield event.plain_result("心境已重置为初始状态。")
             return
         if arg == "tick":
-            self._tick()
-            self.state["last_tick"] = time.time()
-            self._save_state()
-            yield event.plain_result("已手动跳一次心跳。\n\n" + self._status_text())
+            sent = await self._manual_tick()
+            tip = "她刚才开口了。" if sent else "这次没开口（概率没中）。"
+            yield event.plain_result(f"已手动跳一次心跳。{tip}\n\n" + self._status_text())
             return
         if arg == "off":
             self._cfg_set("enabled", False)
