@@ -8,8 +8,9 @@
    通过公开接口读取"当前会话"和"人设"，绝不修改已有记忆数据。
 2. **不抢优先级**：注入钩子用 priority=-10（AstrBot 按优先级降序执行），保证
    排在天使之心（40）与 TTS（0）之后，只做"追加"，不覆盖别人的内容。
-3. **只在跨阈值时说话**：心境文本只在状态档位变化时注入，且两次注入至少间隔
-   min_gap_minutes，避免每轮刷屏、白烧 token。
+3. **只在跨阈值时说话**：心境文本只在档位变化或某个维度跨十位分界线时注入；
+   同档内的数值漂移按 min_gap_minutes 节流，但**跨档必注**——档位是行为开关，
+   漏报会让她"不知道自己已经在生气了"。
 4. **主动说话走正常发送通道**：用 Context.send_message 直接出站（等效于走管线
    的成品消息），不伪造 event 去骗管线。
 5. **兜底优先**：任何外部依赖（LLM / TTS / 会话历史）失败都只降级、不抛错。
@@ -89,7 +90,7 @@ def _thought_summary(thoughts: list) -> list:
 
 
 PLUGIN_NAME = "astrbot_plugin_fish_heart"
-VERSION = "0.3.1"
+VERSION = "0.3.2"
 
 # 注入钩子优先级：AstrBot 按优先级 **降序** 执行。
 # 天使之心 = 40，TTS = 0，这里用 -10 表示最后一个执行（只追加、不覆盖）。
@@ -136,25 +137,99 @@ BASELINE = {
     "joy": 50.0,
 }
 
-# 回落速度：慢变量 0.03，快变量（情绪类）0.05
+# 回落速度。
+# 依恋/亲密是"存量"：每天能加的就十几点，再用 0.03 的回落（一天 20 点）去冲，
+# 它们永远只能趴在基线上。所以这两个单独慢一档（0.01 ≈ 一周明显疏远）。
+# 情绪类（喜悦/压力/疲惫）才是快变量，本来就不该积累。
 DECAY_RATE = {
-    "attachment": 0.03,
+    "attachment": 0.01,
     "curiosity": 0.04,
     "reflection": 0.03,
     "duty": 0.03,
     "social": 0.04,
     "fatigue": 0.05,
-    "intimacy": 0.03,
+    "intimacy": 0.01,
     "stress": 0.05,
     "joy": 0.05,
+}
+
+# 关系被消耗：一直凶她（害怕/回避以上）时，依恋和亲密每心跳慢性掉一点。
+# 吵一次架但没哄，blame 会自己褪到 40（心结=委屈），侵蚀就停了；
+# 一直凶才会掉完——一周的冷暴力约 -35。
+RELATION_ERODE_FROM = 55.0
+RELATION_ERODE_PER_TICK = 0.15
+
+# 正向增益的"连续同类事件"递减。
+# 同一类事情在 HEAT_WINDOW 内重复发生时，第 n+1 次的增益按 1/(1+n/HEAT_DIVISOR) 缩水：
+#   n=0 → 100%，n=8 → 50%，n=24 → 25%，n=80 → 9%
+# 意思是"聊 30 条"约等于"发生了 11 件事"，而一次夸奖仍然是一次夸奖。
+# 不加这个的话，增益是按消息条数线性累加的，一晚上 30 条就能把社交顶到 70。
+HEAT_WINDOW_SEC = 10 * 60
+HEAT_DIVISOR = 12.0
+
+# 疲惫的边际递减：越累，"再聊一句"加的那点疲惫越少。
+# 不做这个的话 +0.6/条 是线性的，150 条/天上午就顶到 100，
+# 之后一整天都是「累了」，睡一觉也只是把时间线推回原点。
+FATIGUE_DAMPING = 0.5
+FATIGUE_MIN_GAIN = 0.25
+
+# 睡一觉：安静够久就把疲惫拉回来（不是清零，是"精神了一点"）
+SLEEP_IDLE_HOURS = 6.0
+SLEEP_FATIGUE_AFTER = 35.0
+
+# 太累了就不主动找人说话（"很想他"那种除外）
+TIRED_PROACTIVE_FROM = 70.0
+
+# 补跳上限：关机/重载期间最多补 96 次心跳（约 3 天）。
+# 不封顶的话，停机一个月回来会一次性把情绪全部拉平。
+MAX_CATCHUP_TICKS = 96
+
+# 每日正向收益上限：只对"他"（白名单）造成的正向增量生效，按天清零。
+# 它挡的是"一天聊爆"：一晚上连发几百条也不能把当天的量刷完还要往上叠。
+DAILY_GAIN_CAP = {
+    "joy": 40.0,
+    "social": 40.0,
+    "curiosity": 30.0,
+    "intimacy": 40.0,
+    "attachment": 40.0,
+}
+
+# 每个维度的天花板：增益按 `1 - 当前值/天花板` 缩放，越接近它涨得越慢。
+# 默认就是 100 —— 刻度本来就是 0–100，不该偷偷改成 86 让进度条永远填不满。
+# 写成表是为了留一个旋钮：想让某个维度"到不了 100"（比如喜悦最高 94），
+# 改这里就行，不用动代码。
+# 注意 100 本身是渐近线：数学上永远差最后一点点，靠回落和热度收尾。
+DIM_CEILING = {k: 100.0 for k in
+               ("joy", "social", "curiosity", "intimacy", "attachment")}
+
+# 面板渲染的"满格线"。
+# 依恋和亲密按 0-100 画的话永远填不满（实际上限 80 上下），看着像坏了。
+# 这两个按 85 当满格——达到就是"养到头了"，超了也只是 100% 封顶。
+# 其余维度仍是 0-100（喜悦/社交/好奇真能到 80+，压力/疲惫真能到 100）。
+DIM_DISPLAY_MAX = {
+    "attachment": 85.0,
+    "intimacy": 85.0,
+}
+
+# 关系里程碑：到这两个值才算「黏人」/「想亲近」。
+# 面板会按 display_max 把它们折算成刻度线，标在环上——
+# 这样"黏人"是个里程碑，不是满格（满格留给 85 以上那种极端亲密）。
+BOND_INTIMATE_AT = 66.0
+BOND_CLOSE_AT = 62.0
+DIM_DISPLAY_TICK = {
+    "attachment": BOND_INTIMATE_AT,
+    "intimacy": BOND_INTIMATE_AT,
 }
 
 # 事件 → 驱动增量（"blame"/"expectation" 是两条快变量）
 EVENT_EFFECTS = {
     # 他说话了（普通一条）
-    "user_msg": {"social": 2.0, "joy": 1.0, "curiosity": 0.8, "fatigue": 0.6},
+    # 亲密 +0.1：关系靠"天天说话"慢慢变深，但只有一点点，
+    # 想快还是得说甜话（夸奖 +3.5、撒娇 +3）。依恋不吃这个。
+    "user_msg": {"social": 1.8, "joy": 1.0, "curiosity": 0.5, "fatigue": 0.6,
+                 "intimacy": 0.1},
     # 他分享东西（图片 / 链接 / "你看这个"）
-    "share": {"curiosity": 3.0, "joy": 2.0, "social": 1.0},
+    "share": {"curiosity": 2.5, "joy": 1.6, "social": 0.8},
     # 他求助（"帮我看看""怎么办"）——责任感被唤起，也费神
     "request": {"duty": 4.0, "social": 1.0, "fatigue": 1.5},
     # 他道歉
@@ -173,12 +248,14 @@ EVENT_EFFECTS = {
     # 24 小时没回
     "silent_24h": {"stress": 10.0, "attachment": -3.0, "joy": -5.0},
     # 夸奖 / 感谢
-    "praise": {"joy": 8.0, "intimacy": 4.0, "stress": -3.0, "attachment": 2.0},
+    "praise": {"joy": 7.0, "intimacy": 3.5, "stress": -3.0, "attachment": 1.6},
     # 责怪三档
+    # 对关系的打击调小：一句重话该伤的是"情绪"（压力/喜悦/责怪），
+    # 不是"关系"。当场把依恋砍掉，就只剩生气，出不来"又气又想你"。
     "blame_mild": {"stress": 6.0, "blame": 10.0, "joy": -4.0, "reflection": 2.0},
-    "blame_mid": {"stress": 12.0, "blame": 25.0, "joy": -8.0, "attachment": -2.0,
+    "blame_mid": {"stress": 12.0, "blame": 25.0, "joy": -8.0, "attachment": -1.5,
                   "reflection": 3.0},
-    "blame_hard": {"stress": 20.0, "blame": 40.0, "joy": -12.0, "attachment": -5.0,
+    "blame_hard": {"stress": 20.0, "blame": 40.0, "joy": -12.0, "attachment": -3.0,
                    "reflection": 5.0},
     # 真诚哄
     "comfort": {"stress": -8.0, "joy": 5.0, "attachment": 2.0, "reflection": -5.0},
@@ -239,6 +316,24 @@ RECOVERY = {
 }
 RECOVERY_ROUNDS = {MODE_CALM: 1, MODE_WRONGED: 1, MODE_AFRAID: 2, MODE_SHUT: 2}
 
+# 回避档的"不回"阶梯。
+# 索引 = 已经连续不回了几条；值 = 这一条她"回"的概率。
+#   前 5 条 0% → 第 6 条 50% → 第 7 条起 100%
+# 它同时是"没接住的话"的保留上限：这 7 条一条都不能丢，等她终于开口时
+# 要能一口气看全、归纳之后再回。
+SHUT_REPLY_LADDER = (0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 1.0)
+SHUT_HISTORY_CAP = len(SHUT_REPLY_LADDER)
+
+# 群里刚进回避时额外放行几句（她先在群里"受伤地回一句"，之后才完全沉默）
+SHUT_GROUP_GRACE = 1
+
+# 群聊里被凶的那句话要留到私聊里给她看，否则她只知道"被罚了"，不知道为什么
+GROUP_BLAME_CAP = 5
+GROUP_BLAME_KEEP_HOURS = 12.0
+# 群聊流水：只保留最近几条，"他凶她"的那一刻取前面几条当"前因"
+GROUP_TAIL_CAP = 8
+GROUP_BLAME_CTX = 3
+
 # --------------------------------------------------------------------------- #
 # 渠道权重：同一句话，在私聊和群里的分量不同
 # --------------------------------------------------------------------------- #
@@ -261,12 +356,46 @@ BLAME_FADE_PER_6H = 8.0
 # 关键词表：这是她唯一能"读懂"你话里情绪的地方
 KW_BLAME_HARD = ("滚", "闭嘴", "烦死了", "别烦我", "废物", "傻逼", "恶心", "讨厌你", "没用的东西")
 KW_BLAME_MID = ("你又", "怎么又", "说了多少遍", "不听话", "没用", "笨", "每次都")
-KW_BLAME_MILD = ("你怎么", "为什么总是", "别这样", "不行", "不对", "不应该")
+# 轻责：不再收"不行""不对"这种通用词——"今天不行，改天吧""不对，我记错了"
+# 都不是在说她。要的是明确的指向。
+KW_BLAME_MILD = ("你怎么", "为什么总是", "别这样", "这样不行", "这样不对",
+                 "你不对", "不应该")
+# "你怎么" 后面接这些是正常提问，不是责怪
+KW_MILD_EXEMPT = ("你怎么看", "你怎么想", "你怎么说", "你怎么打算",
+                  "你怎么弄", "你怎么过")
 KW_FAKE = ("行了别闹", "别闹了", "至于吗", "多大点事", "行了行了", "随便你", "你开心就好", "小题大做")
-KW_COMFORT = ("对不起", "抱歉", "我错了", "别生气", "不气了", "哄", "抱抱", "亲亲", "我在", "想你",
-              "乖", "没事的", "原谅", "辛苦了", "好啦")
-KW_PRAISE = ("厉害", "真棒", "谢谢", "可爱", "喜欢你", "好久", "爱你", "真好")
-KW_SEEK = ("难受", "不开心", "委屈", "累", "怕", "哭了", "抱")
+# "随便你" 后面接这些是把选择权给他，不是敷衍
+KW_FAKE_EXEMPT = ("随便你点", "随便你选", "随便你挑", "随便你买", "随便你吃", "随便你去")
+
+
+def _hits_fake(text: str) -> bool:
+    """命中"敷衍"——但"随便你点什么都行"是把选择权给他，不算。"""
+    for k in KW_FAKE:
+        if k not in text:
+            continue
+        if k == "随便你" and any(x in text for x in KW_FAKE_EXEMPT):
+            continue
+        return True
+    return False
+
+
+def _hits_blame_mild(text: str) -> bool:
+    """轻责——"你怎么看""你怎么想"是提问，不是责怪。"""
+    for k in KW_BLAME_MILD:
+        if k not in text:
+            continue
+        if k == "你怎么" and any(x in text for x in KW_MILD_EXEMPT):
+            continue
+        return True
+    return False
+KW_COMFORT = ("对不起", "抱歉", "我错了", "别生气", "不气了", "哄", "抱抱", "亲亲",
+              "我在呢", "想你", "乖", "没事的", "原谅", "辛苦了", "好啦")
+KW_PRAISE = ("厉害", "真棒", "谢谢", "可爱", "喜欢你", "爱你", "真好")
+# 求安慰 / 撒娇。
+# 这里**不放**"累""怕""抱"这种高频字：一句"今天上班好累"不该被当成撒娇
+# （那只是普通说话，加社交/喜悦/疲惫），"抱怨""哪怕""恐怕"也会被误伤。
+KW_SEEK = ("难受", "不开心", "委屈", "想哭", "哭了", "撑不住",
+           "害怕", "好怕", "有点怕", "抱抱我", "要抱")
 # 道歉：算一次"轻哄"，平静时也给一点温度
 KW_APOLOGY = ("对不起", "抱歉", "我错了", "是我不对", "不该凶", "原谅我")
 # 他说要睡了
@@ -296,7 +425,9 @@ FALLBACK_LINES = {
     KIND_WHIM: ("刚刚看到个东西，想到你了", "今天天气挺好的", "没什么事，就是想说一句"),
 }
 
-STATE_VERSION = 3
+# v3：私聊/群聊分开记时间戳
+# v4：回避档允许已读不回（silent_streak / unanswered）
+STATE_VERSION = 4
 
 
 # --------------------------------------------------------------------------- #
@@ -329,17 +460,21 @@ def mood_label(drives: dict) -> str:
         return "紧绷"
     if g("fatigue") >= 65:
         return "累了"
-    # 黏人比"开心"更具体：依恋和亲密都很高时，她此刻是黏着你的状态
-    if g("attachment") >= 80 and g("intimacy") >= 80:
+    # 黏人比"开心"更具体：依恋和亲密都很高时，她此刻是黏着你的状态。
+    # 66 而不是 80：关系型维度只靠夸奖/撒娇/及时回推动，正常用量到 60-70，
+    # 用 80 当门槛的话这两个心情永远不会出现。
+    if g("attachment") >= BOND_INTIMATE_AT and g("intimacy") >= BOND_INTIMATE_AT:
         return "黏人"
     # 依恋高但还没那么亲密：想靠近，但还端着
-    if g("attachment") >= 80:
+    if g("attachment") >= BOND_CLOSE_AT:
         return "想亲近"
-    if g("joy") >= 85:
+    # 74 而不是 85：每日收益上限把喜悦的天花板定在 ~75，
+    # 用 85 的话「开心」这个心情永远不会出现。
+    if g("joy") >= 74:
         return "开心"
     if g("reflection") >= 65:
         return "走神"
-    if g("curiosity") >= 70:
+    if g("curiosity") >= 66:
         return "好奇"
     return "平常"
 
@@ -402,6 +537,23 @@ def new_state() -> dict:
         "penalized_24h": False,
         "comfort_streak": 0,
         "blame_noticed_ts": 0.0,
+        # 回避档的"已读不回"：连续不回了几条 + 没接住的那几句话
+        "silent_streak": 0,
+        "last_silent_ts": 0.0,
+        "unanswered": [],
+        # 群聊单独一套计数：群里和私聊是两本账，别互相消耗对方的额度
+        "silent_streak_group": 0,
+        "unanswered_group": [],
+        "group_grace": 0,
+        # 群里被凶的那几句原文（给私聊看，解释"为什么"）
+        "group_blames": [],
+        # 群聊流水：谁说了什么，用来给"凶句"配前因
+        "group_tail": [],
+        # 同类事件的"热度"（最近 10 分钟各发生了几次），用来压正向增益
+        "event_heat": {},
+        # 今天"他"已经给她涨了多少（按维度），到点清零
+        "daily_gain": {},
+        "daily_gain_day": "",
         "umo": "",
         "recent": [],
         "recent_events": [],
@@ -606,12 +758,37 @@ class EmotionCore(Star):
         无论如何都不会碰依恋/亲密/压力/责怪/期待，也不会解除等待态，
         更不会更新 last_private_msg / last_owner_group_msg 或 recent。
         """
+    def _absorb_outsider_turn(
+        self, request, umo: str = "", text: str = ""
+    ) -> None:
+        """别人的话（群聊里的他人 / 私聊里的陌生人）：只让气氛热闹一点。
+
+        perception.outsider_effect：
+          - "social_joy_only"（默认）：社交 +2、喜悦 +1（**最多**这么多）
+          - "none"：完全忽略
+
+        这两个增量也要吃和"他"一样的限制：越接近 100 加得越少，同一批人
+        在 10 分钟内连着说，后几句的份量递减。不加的话，一个热闹的群
+        几十条消息就能把社交顶到 100——她跟人聊一晚上，反而对谁都没感觉了。
+
+        无论如何都不会碰依恋/亲密/压力/责怪/期待，也不会解除等待态，
+        更不会更新 last_private_msg / last_owner_group_msg 或 recent。
+        群聊里会往 `group_tail` 记一笔"群友说了什么"——不是让她上心，
+        而是等他迁怒她时，她能在私聊里看到前因里还有别人。
+        """
         effect = str(self._cfg("perception.outsider_effect", "social_joy_only") or "")
         if effect == "none":
             return
+        if umo and self._is_group(umo):
+            # 记一笔"群友说了什么"：只作前因背景，不动她的心
+            self._note_group_tail("other", text)
         drives = self.state["drives"]
-        drives["social"] = clamp(float(drives.get("social", 0.0)) + 2.0)
-        drives["joy"] = clamp(float(drives.get("joy", 0.0)) + 1.0)
+        heat = self._heat_factor("outsider")
+        for k, dv in (("social", 2.0), ("joy", 1.0)):
+            cur = float(drives.get(k, 0.0))
+            delta = dv * max(0.0, 1.0 - cur / DIM_CEILING.get(k, 100.0)) * heat
+            if delta:
+                drives[k] = clamp(cur + delta)
         block = self._build_injection(for_owner=False, umo=umo)
         if block:
             req_sp = getattr(request, "system_prompt", "") or ""
@@ -714,8 +891,12 @@ class EmotionCore(Star):
                     continue
                 now = time.time()
                 interval = self._tick_interval() * 60
-                if now - float(self.state.get("last_tick", 0)) >= interval:
-                    self._tick()
+                gap = now - float(self.state.get("last_tick", 0))
+                if gap >= interval:
+                    # 关机/重载期间错过的心跳要补：一次跳 missed 次，
+                    # 否则"关了一夜"只算一次，情绪几乎不动。
+                    missed = max(1, int(gap // interval))
+                    self._tick(missed)
                     self.state["last_tick"] = now
                     self._save_state()
                     await self._maybe_proactive()
@@ -737,28 +918,86 @@ class EmotionCore(Star):
 
     # ---------------- 核心状态机 ----------------
 
-    def _tick(self) -> None:
+    def _tick(self, missed: int = 1) -> None:
+        """心跳。missed > 1 表示补跳（关机/重载期间错过的次数）。
+
+        补跳只作用于"向基线回落"这一步，用闭式解一次算完：
+            v = base + (v - base) × (1 - rate)^n
+        耦合、念头、睡眠判定仍然只跑一次——它们本来就是"每心跳微调"，
+        不该因为关机三天就叠三天。
+        """
         st = self.state
         drives = st["drives"]
-        # 1) 向基线回落
+        n = max(1, min(int(missed or 1), MAX_CATCHUP_TICKS))
+        # 1) 向基线回落（依恋/亲密在 DECAY_RATE 里单独慢一档）
         for k, base in BASELINE.items():
             cur = float(drives.get(k, base))
-            drives[k] = cur + (base - cur) * DECAY_RATE[k]
+            rate = DECAY_RATE[k]
+            if n == 1:
+                drives[k] = cur + (base - cur) * rate
+            else:
+                drives[k] = base + (cur - base) * (1.0 - rate) ** n
+        # 1.5) 睡了一觉：安静够久，疲惫不该还挂在那儿
+        last_act = max(
+            float(st.get("last_user_msg", 0) or 0),
+            float(st.get("last_owner_group_msg", 0) or 0),
+            float(st.get("last_assistant_msg", 0) or 0),
+            float(st.get("last_proactive", 0) or 0),
+        )
+        if last_act and time.time() - last_act >= SLEEP_IDLE_HOURS * 3600:
+            if drives["fatigue"] > SLEEP_FATIGUE_AFTER:
+                self._dbg(
+                    "安静了 %.0f 小时，疲惫 %.0f → %.0f",
+                    (time.time() - last_act) / 3600.0,
+                    drives["fatigue"],
+                    SLEEP_FATIGUE_AFTER,
+                )
+                drives["fatigue"] = SLEEP_FATIGUE_AFTER
         # 2) 耦合
-        if drives["attachment"] > 70:
-            drives["intimacy"] = clamp(drives["intimacy"] + 1.5)
-        if drives["intimacy"] > 75:
-            drives["attachment"] = clamp(drives["attachment"] + 1.0)
+        # 全部按"超出阈值多少"成比例，而不是一过线就每 tick 扣固定值。
+        # 原来 `fatigue > 60` 就是好奇 -1.5/tick（= 一天 -48），
+        # 一次长聊就能把好奇按到 20 以下，而且再也爬不回来。
+        # 依恋/亲密互相"拉齐"，但不会把对方拖过自己：
+        # 原来是无条件 +1.5/+1.0 每心跳，两个维度会互相喂成 100（回落压不住）。
+        # 现在只把低的那边往上拉、且只拉向高的那边，天然自限。
+        if drives["attachment"] > 70 and drives["intimacy"] < drives["attachment"]:
+            drives["intimacy"] = clamp(
+                drives["intimacy"]
+                + 0.06 * (drives["attachment"] - drives["intimacy"])
+            )
+        if drives["intimacy"] > 75 and drives["attachment"] < drives["intimacy"]:
+            drives["attachment"] = clamp(
+                drives["attachment"]
+                + 0.04 * (drives["intimacy"] - drives["attachment"])
+            )
         if drives["stress"] > 60:
-            drives["joy"] = clamp(drives["joy"] - 2.0)
+            drives["joy"] = clamp(
+                drives["joy"] - 1.5 * (drives["stress"] - 60) / 40
+            )
         if drives["fatigue"] > 60:
-            drives["curiosity"] = clamp(drives["curiosity"] - 1.5)
+            drives["curiosity"] = clamp(
+                drives["curiosity"] - 1.0 * (drives["fatigue"] - 60) / 40
+            )
         if drives["curiosity"] > 75:
-            drives["joy"] = clamp(drives["joy"] + 1.0)
+            drives["joy"] = clamp(
+                drives["joy"] + 0.8 * (drives["curiosity"] - 75) / 25
+            )
         if drives["social"] < 30:
-            drives["attachment"] = clamp(drives["attachment"] - 1.0)
+            drives["attachment"] = clamp(
+                drives["attachment"] - 0.8 * (30 - drives["social"]) / 30
+            )
         if drives["joy"] > 75:
-            drives["stress"] = clamp(drives["stress"] - 1.5)
+            drives["stress"] = clamp(
+                drives["stress"] - 1.0 * (drives["joy"] - 75) / 25
+            )
+        # 2.5) 关系侵蚀：一直凶她（害怕/回避）时，依恋和亲密慢性掉。
+        # 吵一次就停手的话 blame 会褪到 40（心结），侵蚀自然停；
+        # 一直凶才会把关系磨没。
+        if float(st.get("blame_pressure", 0.0)) >= RELATION_ERODE_FROM:
+            for k in ("attachment", "intimacy"):
+                drives[k] = clamp(
+                    float(drives.get(k, 0.0)) - RELATION_ERODE_PER_TICK
+                )
 
         # 3) 期待值：她开口过、你还没回 → 慢慢涨
         if st.get("awaiting_reply"):
@@ -883,6 +1122,50 @@ class EmotionCore(Star):
         if engine:
             engine.note_attempt(self.state.get("thoughts") or [])
 
+    def _heat_factor(self, name: str) -> float:
+        """同类事件在 HEAT_WINDOW 内第 n 次发生时的增益系数（1 → 0）。
+
+        只对"正向"增量生效（见 `_apply_event`）：聊 30 条 ≈ 11 件的份量，
+        但隔一会儿再说话又回到满份——所以是"别一晚上聊满"，不是"永远涨不动"。
+        """
+        now = time.time()
+        book = self.state.get("event_heat")
+        if not isinstance(book, dict):
+            book = {}
+            self.state["event_heat"] = book
+        rows = [t for t in (book.get(name) or []) if now - float(t) <= HEAT_WINDOW_SEC]
+        factor = 1.0 / (1.0 + len(rows) / HEAT_DIVISOR)
+        rows.append(now)
+        # 只留窗口内可能出现的条数：1 分钟 3 条也才 30 条，200 已经够宽
+        book[name] = rows[-200:]
+        return factor
+
+    def _clip_daily_gain(self, k: str, delta: float) -> float:
+        """截断到今天的剩余额度；返回真正允许加的量。
+
+        额度按本地自然日清零。它只管"往上涨"，不管回落、也不管负向事件——
+        所以她该难过还是会难过，只是没法一天之内被夸到天上。
+        """
+        cap = DAILY_GAIN_CAP.get(k)
+        if not cap:
+            return delta
+        st = self.state
+        day = now_day()
+        if st.get("daily_gain_day") != day:
+            st["daily_gain_day"] = day
+            st["daily_gain"] = {}
+        book = st.get("daily_gain")
+        if not isinstance(book, dict):
+            book = {}
+            st["daily_gain"] = book
+        used = float(book.get(k, 0.0) or 0.0)
+        room = cap - used
+        if room <= 0:
+            return 0.0
+        take = min(delta, room)
+        book[k] = used + take
+        return take
+
     def _apply_event(
         self, name: str, weight: float = 1.0, is_group: bool = False
     ) -> None:
@@ -897,29 +1180,58 @@ class EmotionCore(Star):
         if is_group and name in NEGATIVE_EVENTS:
             mult = float(self._cfg("channel.negative_multiplier", 1.2))
 
+        blame_before = float(st.get("blame_pressure", 0.0))
+        heat = self._heat_factor(name)
+        applied: dict[str, float] = {}
         for k, dv in eff.items():
             delta = float(dv) * mult
             if not delta:
                 continue
             if k == "blame":
-                st["blame_pressure"] = clamp(
-                    float(st.get("blame_pressure", 0.0)) + delta
-                )
+                old_b = float(st.get("blame_pressure", 0.0))
+                st["blame_pressure"] = clamp(old_b + delta)
+                applied[k] = applied.get(k, 0.0) + (st["blame_pressure"] - old_b)
             elif k == "expectation":
-                st["expectation"] = clamp(float(st.get("expectation", 0.0)) + delta)
+                old_e = float(st.get("expectation", 0.0))
+                st["expectation"] = clamp(old_e + delta)
+                applied[k] = applied.get(k, 0.0) + (st["expectation"] - old_e)
             elif k in drives:
                 old = float(drives.get(k, BASELINE[k]))
+                if delta > 0 and k == "fatigue":
+                    # 越累越难更累：留个 25% 的下限，长聊仍然比短聊累
+                    delta *= max(
+                        FATIGUE_MIN_GAIN, 1.0 - FATIGUE_DAMPING * old / 100.0
+                    )
                 # 越接近 100 增益越小：不然一聊就贴顶、之后再也不动。
-                # 疲惫和压力不做抑制——它们是"代价"，累了就是累了，攒着才算数。
-                if delta > 0 and k not in ("fatigue", "stress"):
-                    delta *= max(0.0, 1.0 - old / 100.0)
+                # 疲惫和压力不做这个抑制——它们是"代价"，累了就是累了，攒着才算数。
+                elif delta > 0 and k not in ("fatigue", "stress"):
+                    # 越接近自己的天花板增益越小——100 分是永远够不到的
+                    delta *= max(0.0, 1.0 - old / DIM_CEILING.get(k, 100.0))
+                    # 同一类事情短时间内反复发生 → 这一条的份量打折
+                    delta *= heat
+                # 每日收益上限：他今天还能让她往这个方向涨多少
+                if delta > 0 and k in DAILY_GAIN_CAP:
+                    delta = self._clip_daily_gain(k, delta)
+                    if delta <= 0:
+                        continue
                 new = clamp(old + delta)
                 # 群聊只限制"往上涨"的天花板，不把已经更高的值压下来
                 if is_group and delta > 0 and k in GROUP_CAPS:
                     new = min(new, max(GROUP_CAPS[k], old))
                 drives[k] = new
-        # 记一笔"刚才因为什么变了"，给面板的「最近的变化」用
-        self._note_event(name, eff, mult)
+                applied[k] = applied.get(k, 0.0) + (new - old)
+        # 刚跨进"回避"：群里先放她回一句（受伤的那一句），之后才彻底闭麦。
+        # 只在这一刻给，不是每个事件都给——否则群友每说一句她就多一次豁免。
+        if (
+            name in NEGATIVE_EVENTS
+            and mode_of(blame_before) != MODE_SHUT
+            and mode_of(float(st.get("blame_pressure", 0.0))) == MODE_SHUT
+        ):
+            st["group_grace"] = SHUT_GROUP_GRACE
+        # 记一笔"刚才因为什么变了"，给面板的「最近的变化」用。
+        # 传的是**实际生效**的增量（已经过渠道权重、衰减、退热），
+        # 不是表里的名义值——否则面板会一直显示"社交 +2.0"，看起来像没改过。
+        self._note_event(name, applied, 1.0)
         self._dbg(
             "事件 %s 已应用（w=%.3f），mode=%s",
             name,
@@ -948,9 +1260,7 @@ class EmotionCore(Star):
 
         # 1) 敷衍式哄（只在委屈以上才成立）
         dismissive_only = False
-        if mode in (MODE_WRONGED, MODE_AFRAID, MODE_SHUT) and any(
-            k in t for k in KW_FAKE
-        ):
+        if mode in (MODE_WRONGED, MODE_AFRAID, MODE_SHUT) and _hits_fake(t):
             if any(k in t for k in KW_COMFORT):
                 # 嘴上在哄，语气却在打发 → 哄的进度作废
                 events.append("fake_comfort")
@@ -964,7 +1274,7 @@ class EmotionCore(Star):
             events.append("blame_hard")
         elif any(k in t for k in KW_BLAME_MID):
             events.append("blame_mid")
-        elif any(k in t for k in KW_BLAME_MILD):
+        elif _hits_blame_mild(t):
             events.append("blame_mild")
 
         # 2.5) 纯敷衍、又不构成明确责怪 → 按最轻一档，不能白说
@@ -1038,7 +1348,9 @@ class EmotionCore(Star):
             is_group = self._is_group(umo)
             if not self._is_owner(event, umo):
                 # 不是"他"说的话：只让气氛热闹一点，其余一律不碰
-                self._absorb_outsider_turn(request, umo)
+                self._absorb_outsider_turn(
+                    request, umo, (getattr(event, "message_str", "") or "").strip()
+                )
                 return
 
             # 只有"他"的会话才更新"最近跟谁说话"，防止陌生人劫持主动目标
@@ -1083,6 +1395,18 @@ class EmotionCore(Star):
             if not is_group:
                 # 最近对话只记私聊：主动说话是发给私聊的，别把群聊混进去
                 self._push_recent("user", text[:200])
+            else:
+                if any(ev in NEGATIVE_EVENTS for ev in events):
+                    # 群里被凶：先快照"前因"（此刻 tail 里还没有这一句），
+                    # 否则切到私聊她只知道"被罚了"、不知道为什么。
+                    self._note_group_blame(text)
+                self._note_group_tail("owner", text)
+
+            # 回避档：允许她"看见了不回"。必须放在注入之前——被无视的这一轮
+            # 不能占用心境报到的名额，否则她下一条真回复会以为自己已经知道心境了。
+            if self._maybe_go_silent(event, events, text, is_group):
+                self._save_state()
+                return
 
             # 走到这里一定是"他"（私聊或群里白名单），给完整心境
             block = self._build_injection(umo=umo)
@@ -1090,6 +1414,24 @@ class EmotionCore(Star):
                 req_sp = getattr(request, "system_prompt", "") or ""
                 setattr(request, "system_prompt", (req_sp.rstrip() + "\n\n" + block).strip())
                 self._dbg("已注入心境: %s", block.replace("\n", " / "))
+
+            # 她沉默那几条不会进 AstrBot 的对话历史（请求被终止了），
+            # 所以在这里把"没接住的话"补给她，免得她真的失忆。
+            if self._cfg("inject.enabled", True):
+                extras = [self._drain_unanswered(is_group)]
+                if not is_group:
+                    # 群里被凶的那句话，切到私聊时补上——她得知道"为什么"
+                    extras.append(self._drain_group_blames())
+                for extra in extras:
+                    if not extra:
+                        continue
+                    req_sp = getattr(request, "system_prompt", "") or ""
+                    setattr(
+                        request,
+                        "system_prompt",
+                        (req_sp.rstrip() + "\n\n" + extra).strip(),
+                    )
+                    self._dbg("补充上下文 %s 行", extra.count("\n") + 1)
 
             self._save_state()
         except Exception as e:
@@ -1122,10 +1464,14 @@ class EmotionCore(Star):
             perf = book.get(key)
             if not isinstance(perf, dict):
                 perf = {}
-            changed = (mode != perf.get("mode")) or (sig != perf.get("sig"))
-            if not changed:
+            mode_changed = mode != perf.get("mode")
+            sig_changed = sig != perf.get("sig")
+            if not mode_changed and not sig_changed:
                 return ""
-            if now_ts - float(perf.get("ts", 0.0)) < gap_min * 60:
+            # 跨档必注：档位是行为开关（尤其进/出"回避"），漏报会让她
+            # 以为自己的心境没变，于是接着按常态说话。
+            # 间隔只用来压制同档内的数值漂移——不然每轮都在抖一格。
+            if not mode_changed and now_ts - float(perf.get("ts", 0.0)) < gap_min * 60:
                 return ""
             book[key] = {"ts": now_ts, "mode": mode, "sig": sig}
             # 旧字段继续维护，方便 /心 与调试时看"最后一次注入"
@@ -1148,10 +1494,221 @@ class EmotionCore(Star):
             f"压力 {drives['stress']:.0f} 期待 {st.get('expectation', 0):.0f}",
             f"倾向：{hint}",
         ]
+        # 矛盾情绪：又在生气、又不想他走。不写出来模型容易只演前半句。
+        # 从「委屈」就开始（25），因为"委屈但还想要你"才是这个角色最典型的样子；
+        # 等到害怕/回避才提示就太晚了。
+        if blame >= 25.0 and (
+            float(drives.get("attachment", 0.0)) >= 55.0
+            or float(drives.get("intimacy", 0.0)) >= 55.0
+        ):
+            lines.append("心里矛盾：还在生他的气，可你又不想他真的走。")
         if for_owner:
             thought = _pending_hint(st.get("thoughts") or [])
             if thought:
                 lines.append(f"心里惦记着：{thought}")
+        return "\n".join(lines)
+
+    # ---------------- 回避档：已读不回 ----------------
+
+    def _maybe_go_silent(
+        self, event: AstrMessageEvent, events: list[str], text: str, is_group: bool
+    ) -> bool:
+        """回避档下允许她看见了不回。返回 True 表示这一轮不回。
+
+        规则（前三条写死，不开放配置，因为每一条都会把别的东西弄坏）：
+          - 命令（/ 开头）必回：否则 /心 status 都会失灵，你连诊断都做不了
+          - 真哄 / 道歉必回：她可以冷着脸，但不能让心结永远解不开
+          - 群里刚进回避时先放行 1 句（`SHUT_GROUP_GRACE`），之后才闭麦；
+            之后再进回避会重新给这一句
+
+        回不回按 `SHUT_REPLY_LADDER` 走：**前 5 条必不回 → 第 6 条 50% → 第 7 条起必回**。
+        私聊和群聊各有一套计数（`silent_streak` / `silent_streak_group`），
+        群里不回你几条，不会把私聊的额度吃掉。
+        这 7 条一条都不会丢，全存在 `unanswered` / `unanswered_group` 里，
+        等她终于开口时一次性交给她（见 `_drain_unanswered`）。
+        想整段关掉：`shut.enabled = false`。
+
+        拦截用的是 AstrBot 的 `stop_event()`：OnLLMRequestEvent 钩子跑完后
+        管线见到 `is_stopped()` 就直接返回，既不请求 LLM，也不发任何消息。
+        """
+        st = self.state
+        if st.get("mode") != MODE_SHUT:
+            # 一出回避档就把两套连续计数清零，下次再进去重新攒
+            st["silent_streak"] = 0
+            st["silent_streak_group"] = 0
+            st["group_grace"] = 0
+            return False
+        if not self._cfg("shut.enabled", True):
+            return False
+        if (text or "").lstrip().startswith("/"):
+            return False
+        if any(e in ("comfort", "apology") for e in (events or [])):
+            return False
+        # 群里刚进回避那一下，放她回一句"受伤的话"；用掉之后就按阶梯走了
+        if is_group and int(st.get("group_grace", 0)) > 0:
+            st["group_grace"] = int(st.get("group_grace", 0)) - 1
+            self._dbg("回避档：群里最后放行一句（grace 用完）")
+            # 放行这一句说明她开口了，群里的连续计数从头算
+            st["silent_streak_group"] = 0
+            return False
+
+        streak_key = "silent_streak_group" if is_group else "silent_streak"
+        rows_key = "unanswered_group" if is_group else "unanswered"
+        streak = int(st.get(streak_key, 0))
+        # 已经超过阶梯长度就按最后一级算（必回），保证不会真的无限沉默
+        p_reply = SHUT_REPLY_LADDER[min(streak, SHUT_HISTORY_CAP - 1)]
+        if p_reply >= 1.0:
+            return False
+        if random.random() < p_reply:
+            return False  # 掷中了"这条要回"
+
+        now = time.time()
+        st[streak_key] = streak + 1
+        st["last_silent_ts"] = now
+        if (text or "").strip():
+            rows = list(st.get(rows_key) or [])
+            rows.append({"t": text.strip()[:200], "ts": now})
+            # 保留全部 7 条：她要能一次看全、归纳之后再回
+            st[rows_key] = rows[-SHUT_HISTORY_CAP:]
+
+        self._dbg(
+            "回避档：这条选择不回（%s 连续 %s/%s 条，这一条回的 p=%.2f）",
+            "群" if is_group else "私聊",
+            st[streak_key],
+            SHUT_HISTORY_CAP,
+            p_reply,
+        )
+        # 只有 stop_event() 是管线明确检查的开关：
+        #   internal.py:  if await call_event_hook(event, OnLLMRequestEvent, req): return
+        #   context_utils.py: call_event_hook() 每个 handler 之后看 is_stopped()，是就返回 True
+        # 于是既不请求 LLM，也不产生任何出站消息。
+        # （should_call_llm() 不在这里用：它的语义在各版本间是反的，加了只会误导后来人。）
+        try:
+            event.stop_event()
+        except Exception as e:
+            logger.warning("[鱼的心] 终止事件失败，她可能还是会回: %s", e)
+        return True
+
+    def _drain_unanswered(self, is_group: bool = False) -> str:
+        """把"她没接住的那几条"整包交给她；取过就清空。
+
+        关键是**先归纳、再回**：她要看到的是这几条合起来在说什么，
+        而不是挑最后一条敷衍一句。私聊与群聊各一份，不混着给。
+        """
+        st = self.state
+        streak_key = "silent_streak_group" if is_group else "silent_streak"
+        rows_key = "unanswered_group" if is_group else "unanswered"
+        rows = list(st.get(rows_key) or [])
+        if not rows:
+            return ""
+        st[rows_key] = []
+        st[streak_key] = 0
+        where = "群里" if is_group else ""
+        lines = [
+            f"## 他{where}连发的 {len(rows)} 条（你当时在回避，一条都没接）",
+        ]
+        for r in rows:
+            try:
+                clock = datetime.fromtimestamp(float(r.get("ts", 0))).strftime("%H:%M")
+            except (TypeError, ValueError, OSError):
+                clock = ""
+            body = str(r.get("t") or "").strip()
+            if body:
+                prefix = f"{clock} " if clock else ""
+                lines.append(f"- {prefix}他：{body}")
+        lines.append(
+            "先把这几条连起来读一遍：他到底在说什么、情绪是什么、有没有话里有话；"
+            "在心里归纳成一句话，再回他。不必逐条回应，也不必解释自己为什么沉默。"
+        )
+        return "\n".join(lines) if len(lines) > 2 else ""
+
+    # ---------------- 群聊 → 私聊 的桥 ----------------
+
+    def _note_group_tail(self, role: str, text: str) -> None:
+        """记一条群聊流水（谁说的 + 说了什么），只保留最近几条。
+
+        role: "owner" 是他、"her" 是她自己、"other" 是群友。
+        这条流水本身不注入，只有在他凶她的那一刻才被快照成"前因"。
+        """
+        body = (text or "").strip()
+        if not body:
+            return
+        rows = [
+            r for r in (self.state.get("group_tail") or []) if isinstance(r, dict)
+        ]
+        rows.append({"r": role, "t": body[:120], "ts": time.time()})
+        self.state["group_tail"] = rows[-GROUP_TAIL_CAP:]
+
+    def _note_group_blame(self, text: str) -> None:
+        """留住群里被凶的那一句，外加它前面那几条——她要知道"因为什么"。"""
+        body = (text or "").strip()
+        if not body:
+            return
+        rows = [
+            r
+            for r in (self.state.get("group_blames") or [])
+            if isinstance(r, dict)
+        ]
+        # 触发句此刻还没进 tail，所以这里取的正好是"前因"
+        ctx = [
+            r
+            for r in (self.state.get("group_tail") or [])
+            if isinstance(r, dict)
+        ][-GROUP_BLAME_CTX:]
+        rows.append({"t": body[:200], "ts": time.time(), "ctx": ctx})
+        self.state["group_blames"] = rows[-GROUP_BLAME_CAP:]
+
+    def _drain_group_blames(self) -> str:
+        """把 12 小时内的群聊"凶句 + 前因"拼成注入块（只进私聊，不清理）。
+
+        不清理是因为她可能要被说好几次才缓过来：只要还没回到平静，
+        这段"你为什么挨骂"就该一直在她眼前。
+        """
+        st = self.state
+        rows = st.get("group_blames") or []
+        if not isinstance(rows, list) or not rows:
+            return ""
+        if st.get("mode") == MODE_CALM:
+            # 已经哄好了：这页翻过去，别在平静时还挂着旧账
+            st["group_blames"] = []
+            return ""
+        cutoff = time.time() - GROUP_BLAME_KEEP_HOURS * 3600
+        fresh = [
+            r
+            for r in rows
+            if isinstance(r, dict) and float(r.get("ts", 0) or 0) >= cutoff
+        ]
+        st["group_blames"] = fresh
+        if not fresh:
+            return ""
+
+        def stamp(ts: Any) -> str:
+            try:
+                return datetime.fromtimestamp(float(ts or 0)).strftime("%H:%M")
+            except (TypeError, ValueError, OSError):
+                return ""
+
+        lines = ["## 群里刚才发生了什么（你因为这些被凶了）"]
+        for r in fresh[-GROUP_BLAME_CAP:]:
+            for c in r.get("ctx") or []:
+                if not isinstance(c, dict):
+                    continue
+                body = str(c.get("t") or "").strip()
+                if not body:
+                    continue
+                who = {"owner": "他", "her": "你", "other": "群友"}.get(
+                    str(c.get("r") or ""), "群友"
+                )
+                lines.append(f"- {stamp(c.get('ts'))} {who}：{body}")
+            body = str(r.get("t") or "").strip()
+            if body:
+                lines.append(f"- {stamp(r.get('ts'))} 他：{body}　← 就是这句")
+        if len(lines) <= 1:
+            return ""
+        lines.append(
+            "这是背景，不是要你复述。你现在还在生气/委屈，"
+            "知道自己在气什么、气哪一句，就够了。"
+        )
         return "\n".join(lines)
 
     # ---------------- 主动说话 ----------------
@@ -1236,7 +1793,8 @@ class EmotionCore(Star):
         exp = float(st.get("expectation", 0.0))
         att = float(drives.get("attachment", 0.0))
 
-        if exp >= 60 or att >= 70:
+        # 60 而不是 70：依恋正常能到 60-70，70 的话「忍不住先开口」几乎不触发
+        if exp >= 60 or att >= 60:
             kind = KIND_LONGING
         elif exp >= 40 and (
             time.time()
@@ -1263,6 +1821,15 @@ class EmotionCore(Star):
             # 念头有方向：想说话的多给一点，想安静的反向扣
             push = max(0.0, float(self._cfg("thought.proactive_push", 0.15)))
             p = min(0.85, max(0.02, p + push * bias))
+        # 太累了就不想找人说话——"忍不住想他"那种除外，那是例外
+        fatigue = float(drives.get("fatigue", 0.0))
+        if fatigue > TIRED_PROACTIVE_FROM and kind != KIND_LONGING:
+            p *= max(
+                0.15,
+                1.0
+                - (fatigue - TIRED_PROACTIVE_FROM)
+                / (100.0 - TIRED_PROACTIVE_FROM),
+            )
         # 沉默越久越忍不住：12 小时起步线性加成，最多 ×2.5，总上限 0.85
         silent_h = max(
             0.0,
@@ -1599,13 +2166,15 @@ class EmotionCore(Star):
             return
         try:
             umo = self._umo_of(event)
-            # recent 只记私聊；群聊里她那句话不该混进私聊的上下文
-            if self._is_group(umo):
-                return
             if not self._is_owner(event, umo):
                 return
             text = self._response_text(response)
             if not text:
+                return
+            if self._is_group(umo):
+                # recent 只记私聊；但群里她说的话要进 group_tail——
+                # 她自己的上一句很可能就是"为什么被凶"的那一半原因。
+                self._note_group_tail("her", text)
                 return
             self._push_recent("bot", text[:200])
             # 她的普通回复也算"说过话"，用于主动说话时算时间差
@@ -1697,6 +2266,8 @@ class EmotionCore(Star):
             "expectation": float(st.get("expectation", 0.0) or 0.0),
             "drives": {k: float(drives.get(k, 0.0) or 0.0) for k in DRIVES},
             "drives_cn": {k: DRIVE_CN.get(k, k) for k in DRIVES},
+            "display_max": {k: float(v) for k, v in DIM_DISPLAY_MAX.items()},
+            "display_tick": {k: float(v) for k, v in DIM_DISPLAY_TICK.items()},
             "thoughts": thoughts,
             "recent": recent,
             "last_proactive": float(st.get("last_proactive", 0) or 0),
@@ -1705,6 +2276,18 @@ class EmotionCore(Star):
             "proactive_count": int(st.get("proactive_count", 0) or 0),
             "proactive_day": str(st.get("proactive_day") or ""),
             "awaiting_reply": bool(st.get("awaiting_reply")),
+            "silent_streak": int(st.get("silent_streak", 0) or 0),
+            "silent_streak_group": int(st.get("silent_streak_group", 0) or 0),
+            "group_grace": int(st.get("group_grace", 0) or 0),
+            "last_silent": float(st.get("last_silent_ts", 0) or 0),
+            "unanswered": len(st.get("unanswered") or []),
+            "unanswered_group": len(st.get("unanswered_group") or []),
+            "group_blames": len(st.get("group_blames") or []),
+            "daily_gain": {
+                str(k): round(float(v or 0), 1)
+                for k, v in (st.get("daily_gain") or {}).items()
+                if isinstance(v, (int, float))
+            },
             "enabled": bool(self._cfg("enabled", True)),
             "thought_enabled": bool(self._cfg("thought.enabled", True)),
             "inject_state": {
@@ -1726,6 +2309,12 @@ class EmotionCore(Star):
                 "segment_reply": bool(self._cfg("proactive.segment_reply", True)),
                 "thought_min_weight": float(self._cfg("thought.min_weight", 0.2)),
                 "thought_push": float(self._cfg("thought.proactive_push", 0.15)),
+                "shut_enabled": bool(self._cfg("shut.enabled", True)),
+                "silent_cap": SHUT_HISTORY_CAP,
+                "daily_cap": {k: float(v) for k, v in DAILY_GAIN_CAP.items()},
+                "silent_next_p": SHUT_REPLY_LADDER[
+                    min(int(st.get("silent_streak", 0) or 0), SHUT_HISTORY_CAP - 1)
+                ],
             },
             "recent_events": [
                 {
@@ -1845,8 +2434,28 @@ class EmotionCore(Star):
         lines = [
             f"【鱼的心 v{VERSION}】状态：{MODE_CN[mode]}（责怪 {blame:.0f}/100）",
             f"期待 {float(st.get('expectation', 0)):.0f}｜真哄进度 {int(st.get('comfort_streak', 0))}",
-            "",
         ]
+        if mode == MODE_SHUT:
+            streak = int(st.get("silent_streak", 0))
+            streak_g = int(st.get("silent_streak_group", 0))
+            p_next = SHUT_REPLY_LADDER[min(streak, SHUT_HISTORY_CAP - 1)]
+            lines.append(
+                f"已读不回：私聊 {streak}/{SHUT_HISTORY_CAP} 条"
+                f"｜群聊 {streak_g}/{SHUT_HISTORY_CAP} 条"
+                f"｜私聊下一条回的概率 {p_next:.0%}"
+            )
+            if int(st.get("group_grace", 0)) > 0:
+                lines.append("群聊还有 1 句放行额度（刚进回避）")
+        book = st.get("daily_gain")
+        if isinstance(book, dict) and book:
+            parts = [
+                f"{DRIVE_CN.get(k, k)} {float(v):.0f}/{DAILY_GAIN_CAP.get(k, 0):.0f}"
+                for k, v in book.items()
+                if float(v or 0) > 0.05
+            ]
+            if parts:
+                lines.append("今日收益：" + "｜".join(parts))
+        lines.append("")
         for k in DRIVES:
             lines.append(f"{DRIVE_CN[k]} {drives[k]:5.1f} {fmt_bar(drives[k])}")
         for line in _thought_summary(st.get("thoughts") or []):

@@ -87,6 +87,13 @@
 
   /* ---------------- 雷达图 ---------------- */
 
+  /** 该维度的"满格线"：依恋/亲密实际到不了 100，按 85 画满，
+   *  否则那两条腿永远是短的、看着像坏了。其余维度仍是 100。 */
+  function fillRatio(drives, k) {
+    const max = Number((drives._max && drives._max[k]) || 100) || 100;
+    return Math.min(1, clamp100(drives[k]) / max);
+  }
+
   function drawRadar(drives) {
     const root = $("radar");
     root.replaceChildren();
@@ -122,7 +129,7 @@
     // 数据面
     const poly = DRIVE_ORDER.map((k, i) => {
       const a = angle(i);
-      const v = clamp100(drives[k]) / 100;
+      const v = fillRatio(drives, k);
       return `${cx + Math.cos(a) * R * v},${cy + Math.sin(a) * R * v}`;
     }).join(" ");
     root.appendChild(svg("polygon", { points: poly, class: "area" }));
@@ -130,7 +137,7 @@
     // 顶点
     DRIVE_ORDER.forEach((k, i) => {
       const a = angle(i);
-      const v = clamp100(drives[k]) / 100;
+      const v = fillRatio(drives, k);
       root.appendChild(svg("circle", {
         cx: cx + Math.cos(a) * R * v,
         cy: cy + Math.sin(a) * R * v,
@@ -146,7 +153,7 @@
       const ly = cy + Math.sin(a) * (R + 26);
       const t = svg("text", {
         x: lx, y: ly,
-        class: clamp100(drives[k]) >= 70 ? "label hot" : "label",
+        class: fillRatio(drives, k) >= 0.8 ? "label hot" : "label",
         "text-anchor": Math.abs(Math.cos(a)) < 0.2 ? "middle" : (Math.cos(a) > 0 ? "start" : "end"),
         "dominant-baseline": "middle",
       });
@@ -168,19 +175,35 @@
     box.replaceChildren();
     rings.forEach(({ k, cn }) => {
       const val = k === "__exp" ? d.expectation : k === "__blame" ? d.blame : d.drives[k];
+      const dm = k in (d.display_max || {}) ? Number(d.display_max[k]) : 100;
+      const pct = Math.min(100, (clamp100(val) / dm) * 100);
+      // 里程碑刻度线：依恋/亲密在「黏人」门槛处标一道，满了才叫满格
+      const tickVal = Number((d.display_tick && d.display_tick[k]) || 0);
       const wrap = document.createElement("div");
       wrap.className = "ring";
+      wrap.title = dm === 100
+        ? `${cn}：${Math.round(clamp100(val))}`
+        : `${cn}：真实 ${Math.round(clamp100(val))}（按 ${dm} 归一成 ${Math.round(pct)}）`
+          + (tickVal > 0 ? `｜刻度线 = ${tickVal}（黏人门槛）` : "");
       const dial = document.createElement("div");
       dial.className = "dial";
+      if (tickVal > 0) {
+        const tick = document.createElement("i");
+        tick.className = "tick";
+        dial.appendChild(tick);
+        const tpct = Math.min(100, (tickVal / dm) * 100);
+        requestAnimationFrame(() => tick.style.setProperty("--t", tpct));
+      }
       const b = document.createElement("b");
-      b.textContent = Math.round(clamp100(val));
+      // 归一化：依恋/亲密按 display_max 映射到 0-100 显示
+      b.textContent = Math.round(pct);
       dial.appendChild(b);
       const cap = document.createElement("div");
       cap.className = "cap";
       cap.textContent = cn;
       wrap.append(dial, cap);
       box.appendChild(wrap);
-      requestAnimationFrame(() => dial.style.setProperty("--p", clamp100(val)));
+      requestAnimationFrame(() => dial.style.setProperty("--p", pct));
     });
 
     const meters = [
@@ -196,11 +219,14 @@
     mbox.replaceChildren();
     meters.forEach(({ k, cn }) => {
       const v = clamp100(d.drives[k]);
+      const dm = k in (d.display_max || {}) ? Number(d.display_max[k]) : 100;
+      const pct = Math.min(100, (v / dm) * 100);
       const row = document.createElement("div");
       row.className = "meter";
-      row.innerHTML = `<span class="name">${cn}</span><span class="bar"><i></i></span><span class="val">${Math.round(v)}</span>`;
+      row.innerHTML = `<span class="name">${cn}</span><span class="bar"><i></i></span><span class="val">${Math.round(pct)}</span>`;
+      row.title = dm === 100 ? `${cn}：${Math.round(v)}` : `${cn}：真实 ${Math.round(v)}（按 ${dm} 归一）`;
       mbox.appendChild(row);
-      requestAnimationFrame(() => { row.querySelector("i").style.width = `${v}%`; });
+      requestAnimationFrame(() => { row.querySelector("i").style.width = `${pct}%`; });
     });
   }
 
@@ -259,6 +285,8 @@
       ["念头", d.thought_enabled ? "开" : "关"],
       ["入池门槛", `${cfg.thought_min_weight ?? 0.2}`],
       ["念头加成", `+${cfg.thought_push ?? 0.15}`],
+      ["回避不回", `私 ${d.silent_streak || 0} · 群 ${d.silent_streak_group || 0}/${cfg.silent_cap || 7}`],
+      ["今日收益", `喜 ${Math.round(d.daily_gain?.joy || 0)}/${cfg.daily_cap?.joy || 0}`],
     ];
     const box = $("chips");
     box.replaceChildren();
@@ -274,6 +302,12 @@
     let readiness;
     if (!d.enabled) {
       readiness = "总开关已关闭，她不会主动开口。";
+    } else if (d.mode === "shut") {
+      const pct = Math.round(Number(cfg.silent_next_p ?? 0) * 100);
+      const cap = Number(cfg.silent_cap || 7);
+      readiness = cfg.shut_enabled === false
+        ? "她在回避：主动说话被冻结，但「已读不回」已关闭，你说话她照常回。"
+        : `她在回避：主动说话被冻结；私聊 ${d.silent_streak || 0}/${cap} 条（这一条回 ${pct}%）、群聊 ${d.silent_streak_group || 0}/${cap} 条不回。`;
     } else if (cfg.quiet_active) {
       readiness = `现在是睡眠时段（${cfg.quiet_hours || "—"}），到点之后才会考虑开口。`;
     } else if (remain > 0) {
@@ -373,6 +407,15 @@
 
   /* ---------------- 主流程 ---------------- */
 
+  /* 单块渲染失败不该把整页拖黑：每张卡各自兜底，剩下的照常显示 */
+  function guard(label, fn) {
+    try {
+      fn();
+    } catch (e) {
+      console.error(`[鱼的心] ${label} 渲染失败`, e);
+    }
+  }
+
   function render(d) {
     applyMode(d.mode);
     document.body.dataset.mode = d.mode;
@@ -386,21 +429,23 @@
     $("tendency").hidden = !hint;
     $("tendencyText").textContent = hint;
 
-    const drives = { ...d.drives, _cn: d.drives_cn || {} };
-    drawRadar(drives);
-    renderVitals(d);
-    renderThoughts(d.thoughts || []);
-    renderProactive(d);
+    const drives = { ...d.drives, _cn: d.drives_cn || {}, _max: d.display_max || {} };
+    guard("雷达", () => drawRadar(drives));
+    guard("此刻", () => renderVitals(d));
+    guard("念头", () => renderThoughts(d.thoughts || []));
+    guard("主动说话", () => renderProactive(d));
     // recent 全是单边（历史遗留）时，改用 AstrBot 的真实对话历史
     const recent = d.recent || [];
     const hasBot = recent.some((m) => m.r === "bot");
-    if (hasBot || !(d.history && d.history.length)) {
-      renderRecent(recent.slice(-12), false);
-    } else {
-      renderRecent(d.history.slice(-12), true);
-    }
-    renderEvents(d.recent_events || []);
-    renderInject(d.inject_state || {});
+    guard("最近说过的话", () => {
+      if (hasBot || !(d.history && d.history.length)) {
+        renderRecent(recent.slice(-12), false);
+      } else {
+        renderRecent(d.history.slice(-12), true);
+      }
+    });
+    guard("最近的变化", () => renderEvents(d.recent_events || []));
+    guard("心境报到簿", () => renderInject(d.inject_state || {}));
 
     $("grid").hidden = false;
     $("errorCard").hidden = true;

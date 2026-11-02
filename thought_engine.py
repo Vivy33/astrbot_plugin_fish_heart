@@ -77,7 +77,7 @@ KIND_META: dict[str, dict] = {
         "release": {"attachment": -2, "expectation": 1},
         "events": ("seeking",),
         "trigger": lambda d, e, w: (
-            1.2 if _g(d, "attachment") >= 58 and float(e) >= 15 else 0.0
+            1.2 if _g(d, "attachment") >= 50 and float(e) >= 15 else 0.0
         ),
     },
     "hug": {
@@ -90,7 +90,7 @@ KIND_META: dict[str, dict] = {
         "events": ("comfort",),
         "trigger": lambda d, e, w: (
             1.1
-            if (_g(d, "stress") >= 55 or _g(d, "attachment") >= 72)
+            if (_g(d, "stress") >= 55 or _g(d, "attachment") >= 58)
             and _g(d, "fatigue") < 72
             else 0.0
         ),

@@ -388,6 +388,27 @@ body::before {
   font-variant-numeric: tabular-nums;
   letter-spacing: -0.02em;
 }
+/* 里程碑刻度：从 12 点方向顺时针 --t*3.6 度，压在环带上 */
+.ring .dial .tick {
+  --t: 0;
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  pointer-events: none;
+  transform: rotate(calc(var(--t) * 3.6deg));
+}
+.ring .dial .tick::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 0;
+  width: 2px;
+  height: 7px;
+  margin-left: -1px;
+  border-radius: 1px;
+  background: var(--text);
+  opacity: 0.5;
+}
 .ring .cap { font-size: 11.5px; color: var(--muted); }
 .ring .cap em { font-style: normal; color: var(--dim); }
 
