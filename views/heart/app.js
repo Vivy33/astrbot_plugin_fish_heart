@@ -377,8 +377,9 @@
     applyMode(d.mode);
     document.body.dataset.mode = d.mode;
 
+    const ver = d.plugin_version ? `v${d.plugin_version} · ` : "";
     $("subtitle").textContent =
-      `此刻${MODES[d.mode]?.cn || ""} · 期待 ${Math.round(d.expectation)} · 责怪 ${Math.round(d.blame)}`;
+      `${ver}此刻${MODES[d.mode]?.cn || ""} · 期待 ${Math.round(d.expectation)} · 责怪 ${Math.round(d.blame)}`;
     $("tickHint").textContent = `心跳 ${fmtAgo(d.last_tick)}`;
 
     const hint = d.hint || "";

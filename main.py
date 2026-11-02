@@ -89,7 +89,7 @@ def _thought_summary(thoughts: list) -> list:
 
 
 PLUGIN_NAME = "astrbot_plugin_fish_heart"
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 
 # 注入钩子优先级：AstrBot 按优先级 **降序** 执行。
 # 天使之心 = 40，TTS = 0，这里用 -10 表示最后一个执行（只追加、不覆盖）。
@@ -212,7 +212,7 @@ MODE_CN = {
 
 # 每个档位给她的说话倾向（注入用，也展示在 Web 面板上）
 MODE_HINT = {
-    MODE_CALM: "语气自然就好，不必刻意黏人",
+    MODE_CALM: "语气自然就好，顺着当下的心情来",
     MODE_WRONGED: "话说短一点；他提刚才的事，先问一句他是不是嫌你烦",
     MODE_AFRAID: "别顶嘴，先确认他还想跟你说话，可以示弱",
     MODE_SHUT: "少说，一两句就够；不主动讨好，也不追问",
@@ -223,6 +223,7 @@ MOOD_HINT = {
     "紧绷": "现在有点绷着，话短一点，别主动找话题",
     "累了": "有点累，别揽太长的活，话可以少一点",
     "黏人": "这会儿特别想黏着他，语气可以更软、也可以更主动",
+    "想亲近": "想跟他再近一点，但还没到随便撒娇的程度，可以稍微软一点",
     "开心": "心情不错，可以多一句玩笑",
     "走神": "有点走神，说话可以松一点、慢一点",
     "好奇": "有点想打听他的事，可以多问一句",
@@ -331,6 +332,9 @@ def mood_label(drives: dict) -> str:
     # 黏人比"开心"更具体：依恋和亲密都很高时，她此刻是黏着你的状态
     if g("attachment") >= 80 and g("intimacy") >= 80:
         return "黏人"
+    # 依恋高但还没那么亲密：想靠近，但还端着
+    if g("attachment") >= 80:
+        return "想亲近"
     if g("joy") >= 85:
         return "开心"
     if g("reflection") >= 65:
@@ -1682,6 +1686,7 @@ class EmotionCore(Star):
         mode = st.get("mode", MODE_CALM)
         return {
             "version": st.get("version"),
+            "plugin_version": VERSION,
             "now": now_ts,
             "umo": str(st.get("umo") or ""),
             "mode": mode,
