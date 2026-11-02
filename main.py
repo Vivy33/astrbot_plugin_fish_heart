@@ -80,7 +80,7 @@ def _thought_summary(thoughts: list) -> list:
 
 
 PLUGIN_NAME = "astrbot_plugin_fish_heart"
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 
 # 注入钩子优先级：AstrBot 按优先级 **降序** 执行。
 # 天使之心 = 40，TTS = 0，这里用 -10 表示最后一个执行（只追加、不覆盖）。
@@ -1189,7 +1189,12 @@ class EmotionCore(Star):
         真消息挂在最后一句，所以优先取最后一个句号之后的内容。
         """
         t = re.sub(r"<system_reminder>.*?</system_reminder>", " ", text or "", flags=re.S)
-        t = re.sub(r"\[Image \d+:[^\]]*\]", "[图片]", t)
+        # 引用块：里面通常只是她自己说过的一句，喂回去只会碍事
+        t = re.sub(r"<Quoted Message>.*?</Quoted Message>", " ", t, flags=re.S)
+        # 图片占位：AstrBot 有 [Image 1: ...]、[Image 1 in quoted message: ...]、[Image] 几种形态，
+        # 都统一成 [图片]——否则路径会原样漏进上下文
+        t = re.sub(r"\[Image\b[^\]]*\]", "[图片]", t)
+        t = re.sub(r"\[CQ:[^\]]*\]", "[图片]", t)
         t = re.sub(r"\s+", " ", t.replace("\r", " ").replace("\n", " ")).strip()
         if not t:
             return ""
@@ -1216,7 +1221,7 @@ class EmotionCore(Star):
             history = []
         return cid, history if isinstance(history, list) else []
 
-    async def _real_transcript(self, umo: str, limit: int = 10) -> str:
+    async def _real_transcript(self, umo: str, limit: int = 24) -> str:
         """从 AstrBot 的真实对话历史里取最近几轮（双方都在）。"""
         try:
             _cid, history = await self._history_of(umo)
@@ -1242,7 +1247,7 @@ class EmotionCore(Star):
                     ).strip()
                     who = "我"
                 if content:
-                    rows.append(f"{who}：{content[:150]}")
+                    rows.append(f"{who}：{content[:120]}")
             return "\n".join(rows[-limit:])
         except Exception as e:
             self._dbg("读取真实对话历史失败: %s", e)
@@ -1310,9 +1315,9 @@ class EmotionCore(Star):
             blocks.append(f"你现在心里惦记着：{thought}。说的时候自然带一点，但别直接复述这句话。")
 
         # 优先用 AstrBot 的真实对话历史（双方都在），拿不到再退回自己的 recent
-        transcript = await self._real_transcript(umo, limit=10)
+        transcript = await self._real_transcript(umo, limit=24)
         if not transcript:
-            transcript = self._recent_transcript(limit=8)
+            transcript = self._recent_transcript(limit=24)
         tr_block = ("最近对话：\n" + transcript + "\n") if transcript else ""
 
         prompt = (
@@ -1366,7 +1371,7 @@ class EmotionCore(Star):
             return persona_prompt
         return self._persona_cache.get(umo, "")
 
-    def _recent_transcript(self, limit: int = 8) -> str:
+    def _recent_transcript(self, limit: int = 24) -> str:
         rows = list(self.state.get("recent", []))[-limit:]
         out = []
         for r in rows:
