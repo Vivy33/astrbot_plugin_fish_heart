@@ -8,7 +8,7 @@ desc: |
 
   命令：/心 status | reset | tick | off | on | umo
   数据目录：data/plugin_data/astrbot_plugin_fish_heart/
-version: 0.2.1
+version: 0.3.0
 author: Vivy33
 repo: "https://github.com/Vivy33/astrbot_plugin_fish_heart"
 astrbot_version: ">=4.16"

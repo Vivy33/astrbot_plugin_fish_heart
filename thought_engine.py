@@ -124,11 +124,12 @@ KIND_META: dict[str, dict] = {
         "text": "想找点事做",
         "hint": "想找点能帮上忙的事做",
         "done": "帮上忙了，有点小得意",
-        "reward": {"duty": 5, "joy": 3},
+        "reward": {"duty": 2, "joy": 3},
         "release": {"duty": -2},
         "events": ("task",),
+        # 门槛要比基线（50）高出足够多，否则几次求助就长期锁定在"想做事"
         "trigger": lambda d, e, w: (
-            0.9 if _g(d, "duty") >= 55 and _g(d, "fatigue") < 65 else 0.0
+            0.9 if _g(d, "duty") >= 65 and _g(d, "fatigue") < 65 else 0.0
         ),
     },
     "quiet": {
@@ -367,6 +368,45 @@ def auto_complete(thought: dict, drives: dict) -> str | None:
     if kind == "task" and _g(drives, "duty") <= 40:
         return "事儿做完啦，心里踏实"
     return None
+
+
+# 念头对"要不要开口"的影响：+1 更想说话，0 无关，−1 更不想说话
+SPEAK_BIAS = {
+    "praise": 1.0,
+    "miss": 1.0,
+    "hug": 1.0,
+    "talk": 1.0,
+    "ask_day": 1.0,
+    "dwell": 0.5,   # 等他回话：忍不住想催，但别太猛
+    "task": 0.0,    # 想做事，跟说不说话没关系
+    "quiet": -1.0,  # 想安静，反而更不该开口
+}
+
+
+def _live_pending(thoughts: list[dict], now: float | None = None) -> list[dict]:
+    now = time.time() if now is None else now
+    return [
+        t
+        for t in thoughts or []
+        if t.get("pending", True) and float(t.get("expires", 0)) > now
+    ]
+
+
+def pending_kind(thoughts: list[dict], now: float | None = None) -> str:
+    """当前最该惦记的那条念头是什么（和 pending_hint 选的是同一条）。"""
+    live = _live_pending(thoughts, now)
+    if not live:
+        return ""
+    best = max(live, key=lambda t: float(t.get("weight", 0)))
+    return str(best.get("kind") or "")
+
+
+def speak_bias(thoughts: list[dict], now: float | None = None) -> float:
+    """这些念头让她更想开口，还是更不想。"""
+    kind = pending_kind(thoughts, now)
+    if not kind:
+        return 0.0
+    return float(SPEAK_BIAS.get(kind, 1.0))
 
 
 def pending_hint(thoughts: list[dict], now: float | None = None) -> str:

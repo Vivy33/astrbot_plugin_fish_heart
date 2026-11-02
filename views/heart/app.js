@@ -188,6 +188,9 @@
       { k: "joy", cn: "喜悦" },
       { k: "social", cn: "社交" },
       { k: "fatigue", cn: "疲惫" },
+      { k: "curiosity", cn: "好奇" },
+      { k: "reflection", cn: "反刍" },
+      { k: "duty", cn: "责任" },
     ];
     const mbox = $("meters");
     mbox.replaceChildren();
@@ -245,6 +248,7 @@
     $("pWaiting").textContent = d.awaiting_reply ? "是" : "否";
 
     $("proactiveHint").textContent = `${MODES[d.mode]?.cn || d.mode} · ${d.enabled ? "心跳中" : "已暂停"}`;
+    $("moodBadge").textContent = d.mood_cn || "平常";
 
     const chips = [
       ["冷却", `${cfg.cooldown_hours}h`],
@@ -253,6 +257,8 @@
       ["睡眠", cfg.quiet_hours || "不限"],
       ["分段发送", cfg.segment_reply ? "开" : "关"],
       ["念头", d.thought_enabled ? "开" : "关"],
+      ["入池门槛", `${cfg.thought_min_weight ?? 0.2}`],
+      ["念头加成", `+${cfg.thought_push ?? 0.15}`],
     ];
     const box = $("chips");
     box.replaceChildren();
@@ -289,6 +295,29 @@
       .trim();
   }
 
+  /** 把「最近的变化」渲染成一行行：事件名 + 主要增量 + 时间 */
+  const DIM_CN = {
+    attachment: "依恋", curiosity: "好奇", reflection: "反刍", duty: "责任",
+    social: "社交", fatigue: "疲惫", intimacy: "亲密", stress: "压力",
+    joy: "喜悦", blame: "责怪", expectation: "期待",
+  };
+
+  function renderEvents(list) {
+    const ul = $("eventList");
+    ul.replaceChildren();
+    $("eventEmpty").hidden = list.length > 0;
+    [...list].reverse().forEach((e) => {
+      const parts = Object.entries(e.d || {})
+        .map(([k, v]) => `${DIM_CN[k] || k} ${v > 0 ? "+" : ""}${v}`)
+        .join(" · ");
+      const li = document.createElement("li");
+      li.innerHTML = `<span class="ev-name"></span><span class="ev-delta"></span><span class="ev-time"></span>`;
+      li.querySelector(".ev-name").textContent = e.cn || e.n || "";
+      li.querySelector(".ev-delta").textContent = parts;
+      li.querySelector(".ev-time").textContent = e.ts ? fmtAgo(e.ts) : "";
+      ul.appendChild(li);
+    });
+  }
   function renderRecent(list, fromHistory) {
     const ol = $("recent");
     ol.replaceChildren();
@@ -369,6 +398,7 @@
     } else {
       renderRecent(d.history.slice(-12), true);
     }
+    renderEvents(d.recent_events || []);
     renderInject(d.inject_state || {});
 
     $("grid").hidden = false;

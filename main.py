@@ -70,6 +70,15 @@ def _pending_hint(thoughts: list) -> str:
         return ""
 
 
+def _speak_bias(thoughts: list) -> float:
+    if not engine:
+        return 0.0
+    try:
+        return engine.speak_bias(thoughts)
+    except Exception:
+        return 0.0
+
+
 def _thought_summary(thoughts: list) -> list:
     if not engine:
         return []
@@ -80,7 +89,7 @@ def _thought_summary(thoughts: list) -> list:
 
 
 PLUGIN_NAME = "astrbot_plugin_fish_heart"
-VERSION = "0.2.1"
+VERSION = "0.3.0"
 
 # 注入钩子优先级：AstrBot 按优先级 **降序** 执行。
 # 天使之心 = 40，TTS = 0，这里用 -10 表示最后一个执行（只追加、不覆盖）。
@@ -143,26 +152,49 @@ DECAY_RATE = {
 # 事件 → 驱动增量（"blame"/"expectation" 是两条快变量）
 EVENT_EFFECTS = {
     # 他说话了（普通一条）
-    "user_msg": {"social": 2.0, "joy": 1.0},
+    "user_msg": {"social": 2.0, "joy": 1.0, "curiosity": 0.8, "fatigue": 0.6},
+    # 他分享东西（图片 / 链接 / "你看这个"）
+    "share": {"curiosity": 3.0, "joy": 2.0, "social": 1.0},
+    # 他求助（"帮我看看""怎么办"）——责任感被唤起，也费神
+    "request": {"duty": 4.0, "social": 1.0, "fatigue": 1.5},
+    # 他道歉
+    "apology": {"stress": -3.0, "blame": -6.0, "joy": 2.0, "attachment": 1.0,
+                "reflection": -3.0},
+    # 他逗她 / 调侃
+    "tease": {"joy": 3.0, "intimacy": 2.0, "stress": -1.0},
+    # 他说要睡了
+    "goodnight": {"attachment": 2.0, "joy": 2.0, "expectation": -100.0},
     # 她主动开口后，他 30 分钟内回了
     "reply_fast": {"attachment": 4.0, "stress": -5.0, "intimacy": 2.0,
                    "expectation": -100.0, "joy": 4.0},
     # 她主动开口后，6 小时没回
-    "silent_6h": {"expectation": 8.0, "attachment": -1.0, "stress": 3.0},
+    "silent_6h": {"expectation": 8.0, "attachment": -1.0, "stress": 3.0,
+                  "reflection": 3.0},
     # 24 小时没回
     "silent_24h": {"stress": 10.0, "attachment": -3.0, "joy": -5.0},
     # 夸奖 / 感谢
     "praise": {"joy": 8.0, "intimacy": 4.0, "stress": -3.0, "attachment": 2.0},
     # 责怪三档
-    "blame_mild": {"stress": 6.0, "blame": 10.0, "joy": -4.0},
-    "blame_mid": {"stress": 12.0, "blame": 25.0, "joy": -8.0, "attachment": -2.0},
-    "blame_hard": {"stress": 20.0, "blame": 40.0, "joy": -12.0, "attachment": -5.0},
+    "blame_mild": {"stress": 6.0, "blame": 10.0, "joy": -4.0, "reflection": 2.0},
+    "blame_mid": {"stress": 12.0, "blame": 25.0, "joy": -8.0, "attachment": -2.0,
+                  "reflection": 3.0},
+    "blame_hard": {"stress": 20.0, "blame": 40.0, "joy": -12.0, "attachment": -5.0,
+                   "reflection": 5.0},
     # 真诚哄
-    "comfort": {"stress": -8.0, "joy": 5.0, "attachment": 2.0},
+    "comfort": {"stress": -8.0, "joy": 5.0, "attachment": 2.0, "reflection": -5.0},
     # 敷衍式哄（"行了别闹了"）
-    "fake_comfort": {"blame": 10.0, "joy": -3.0, "stress": 4.0},
+    "fake_comfort": {"blame": 10.0, "joy": -3.0, "stress": 4.0, "reflection": 2.0},
     # 求安慰 / 撒娇
     "seeking": {"attachment": 3.0, "intimacy": 3.0, "joy": 2.0},
+}
+
+# 事件的中文名（面板「最近的变化」用）
+EVENT_CN = {
+    "user_msg": "说话", "praise": "夸奖", "comfort": "哄她", "seeking": "撒娇",
+    "apology": "道歉", "share": "分享", "request": "求助", "tease": "调侃",
+    "goodnight": "晚安", "reply_fast": "及时回", "silent_6h": "沉默 6h",
+    "silent_24h": "沉默 24h", "blame_mild": "责怪", "blame_mid": "责怪",
+    "blame_hard": "重责", "fake_comfort": "敷衍",
 }
 
 # 责怪压力 → 状态档位
@@ -184,6 +216,17 @@ MODE_HINT = {
     MODE_WRONGED: "话说短一点；他提刚才的事，先问一句他是不是嫌你烦",
     MODE_AFRAID: "别顶嘴，先确认他还想跟你说话，可以示弱",
     MODE_SHUT: "少说，一两句就够；不主动讨好，也不追问",
+}
+
+# 由九维推导的心情 → 给她的说话提示（和面板上的心情徽章同一套判断）
+MOOD_HINT = {
+    "紧绷": "现在有点绷着，话短一点，别主动找话题",
+    "累了": "有点累，别揽太长的活，话可以少一点",
+    "黏人": "这会儿特别想黏着他，语气可以更软、也可以更主动",
+    "开心": "心情不错，可以多一句玩笑",
+    "走神": "有点走神，说话可以松一点、慢一点",
+    "好奇": "有点想打听他的事，可以多问一句",
+    "平常": "",
 }
 
 # 恢复速度（真哄时每轮扣减的 blame）
@@ -223,7 +266,16 @@ KW_COMFORT = ("对不起", "抱歉", "我错了", "别生气", "不气了", "哄
               "乖", "没事的", "原谅", "辛苦了", "好啦")
 KW_PRAISE = ("厉害", "真棒", "谢谢", "可爱", "喜欢你", "好久", "爱你", "真好")
 KW_SEEK = ("难受", "不开心", "委屈", "累", "怕", "哭了", "抱")
-
+# 道歉：算一次"轻哄"，平静时也给一点温度
+KW_APOLOGY = ("对不起", "抱歉", "我错了", "是我不对", "不该凶", "原谅我")
+# 他说要睡了
+KW_GOODNIGHT = ("晚安", "我睡了", "去睡了", "睡觉了", "先睡", "睡啦", "去睡")
+# 他求助：责任感被唤起
+KW_REQUEST = ("帮我", "帮忙", "怎么办", "怎么做", "教教我", "帮我看看", "看下这个")
+# 他分享东西
+KW_SHARE = ("你看这个", "给你看", "分享", "http", "www.", "你看过", "快看")
+# 他逗她
+KW_TEASE = ("逗你", "开玩笑", "吃醋", "小傻瓜", "笨蛋", "是不是喜欢我")
 # 主动说话的三型
 KIND_LONGING = "longing"
 KIND_WAITING = "waiting"
@@ -263,6 +315,29 @@ def mode_of(blame: float) -> str:
     if blame >= 25.0:
         return MODE_WRONGED
     return MODE_CALM
+
+
+def mood_label(drives: dict) -> str:
+    """由九维推导一个"心情"标签——只给面板展示用，不参与任何行为判断。
+
+    档位（平静/委屈/害怕/回避）只看责怪压力，是行为档；
+    心情则是九维当下的样子，用来回答"她现在什么状态"。
+    """
+    g = lambda k: float(drives.get(k, 0.0))  # noqa: E731
+    if g("stress") >= 50:
+        return "紧绷"
+    if g("fatigue") >= 65:
+        return "累了"
+    # 黏人比"开心"更具体：依恋和亲密都很高时，她此刻是黏着你的状态
+    if g("attachment") >= 80 and g("intimacy") >= 80:
+        return "黏人"
+    if g("joy") >= 85:
+        return "开心"
+    if g("reflection") >= 65:
+        return "走神"
+    if g("curiosity") >= 70:
+        return "好奇"
+    return "平常"
 
 
 def fmt_bar(v: float, width: int = 10) -> str:
@@ -325,6 +400,7 @@ def new_state() -> dict:
         "blame_noticed_ts": 0.0,
         "umo": "",
         "recent": [],
+        "recent_events": [],
     }
 
 
@@ -705,7 +781,7 @@ class EmotionCore(Star):
 
         # 5) 念头池：先让到期的念头凉掉，再偶尔冒出新的
         self._expire_thoughts()
-        if random.random() < 0.25:
+        if random.random() < float(self._cfg("thought.spawn_chance", 0.25)):
             self._spawn_thought()
 
         # 6) 状态刷新
@@ -829,11 +905,17 @@ class EmotionCore(Star):
                 st["expectation"] = clamp(float(st.get("expectation", 0.0)) + delta)
             elif k in drives:
                 old = float(drives.get(k, BASELINE[k]))
+                # 越接近 100 增益越小：不然一聊就贴顶、之后再也不动。
+                # 疲惫和压力不做抑制——它们是"代价"，累了就是累了，攒着才算数。
+                if delta > 0 and k not in ("fatigue", "stress"):
+                    delta *= max(0.0, 1.0 - old / 100.0)
                 new = clamp(old + delta)
                 # 群聊只限制"往上涨"的天花板，不把已经更高的值压下来
                 if is_group and delta > 0 and k in GROUP_CAPS:
                     new = min(new, max(GROUP_CAPS[k], old))
                 drives[k] = new
+        # 记一笔"刚才因为什么变了"，给面板的「最近的变化」用
+        self._note_event(name, eff, mult)
         self._dbg(
             "事件 %s 已应用（w=%.3f），mode=%s",
             name,
@@ -885,7 +967,12 @@ class EmotionCore(Star):
         if not events and dismissive_only:
             events.append("blame_mild")
 
-        # 3) 真诚哄（平静但还有残留冤枉时也算哄）
+        # 3) 道歉：即便在平静时也让她软一下，同时算一次"哄"的进度
+        if not events and any(k in t for k in KW_APOLOGY):
+            events.append("apology")
+            st["comfort_streak"] = int(st.get("comfort_streak", 0)) + 1
+
+        # 3.5) 真诚哄（平静但还有残留冤枉时也算哄）
         if not events and any(k in t for k in KW_COMFORT):
             if mode != MODE_CALM or float(st.get("blame_pressure", 0.0)) > 0.5:
                 events.append("comfort")
@@ -893,10 +980,18 @@ class EmotionCore(Star):
             else:
                 events.append("praise")
 
-        # 4) 普通/夸奖/求安慰
+        # 4) 普通 / 分享 / 道晚安 / 求助 / 夸奖 / 逗她 / 求安慰
         if not events:
-            if any(k in t for k in KW_PRAISE):
+            if "[图片]" in t or any(k in t for k in KW_SHARE):
+                events.append("share")
+            elif any(k in t for k in KW_GOODNIGHT):
+                events.append("goodnight")
+            elif any(k in t for k in KW_REQUEST):
+                events.append("request")
+            elif any(k in t for k in KW_PRAISE):
                 events.append("praise")
+            elif any(k in t for k in KW_TEASE):
+                events.append("tease")
             elif any(k in t for k in KW_SEEK):
                 events.append("seeking")
             else:
@@ -1041,21 +1136,13 @@ class EmotionCore(Star):
                 for stale_key, _ in stale:
                     book.pop(stale_key, None)
 
-        hint = MODE_HINT[mode]
-
-        extra = ""
-        if drives["fatigue"] >= 60:
-            extra = "；有点累，别揽太长的活"
-        elif drives["joy"] >= 70:
-            extra = "；心情不错，可以多一句玩笑"
-        elif drives["duty"] >= 70:
-            extra = "；想找点事做"
+        hint = self._hint_text(mode, drives)
 
         lines = [
             "## 你此刻的心境（内部状态，不要复述、不要解释，只影响说话方式）",
             f"状态：{MODE_CN[mode]}｜依恋 {drives['attachment']:.0f} 亲密 {drives['intimacy']:.0f} "
             f"压力 {drives['stress']:.0f} 期待 {st.get('expectation', 0):.0f}",
-            f"倾向：{hint}{extra}",
+            f"倾向：{hint}",
         ]
         if for_owner:
             thought = _pending_hint(st.get("thoughts") or [])
@@ -1167,10 +1254,11 @@ class EmotionCore(Star):
         p = clamp(0.05 + (d - 50.0) / 100.0 * 0.8, 0.05, 0.65)
         if kind == KIND_WHIM:
             p *= 0.6          # 念头型更随机
-        if _pending_hint(st.get("thoughts") or []):
-            # 有念头时按配置加成（加法，而不是原来硬编码的 ×1.3）
+        bias = _speak_bias(st.get("thoughts") or [])
+        if bias:
+            # 念头有方向：想说话的多给一点，想安静的反向扣
             push = max(0.0, float(self._cfg("thought.proactive_push", 0.15)))
-            p = min(0.85, p + push)
+            p = min(0.85, max(0.02, p + push * bias))
         # 沉默越久越忍不住：12 小时起步线性加成，最多 ×2.5，总上限 0.85
         silent_h = max(
             0.0,
@@ -1381,6 +1469,41 @@ class EmotionCore(Star):
                 out.append(f"{who}：{t}")
         return "\n".join(out[-limit:])
 
+    @staticmethod
+    def _hint_text(mode: str, drives: dict) -> str:
+        """档位倾向 + 心情倾向，拼成一句给她的说话提示。
+
+        面板的「倾向」和注入的 system prompt 用同一个来源，避免两边对不上。
+        """
+        base = MODE_HINT.get(mode, "")
+        mood = MOOD_HINT.get(mood_label(drives or {}), "")
+        # 平静档那句是"别太黏"的通用提示，跟"黏人"心情会打架；有心情提示时就让它单独说
+        if mode == MODE_CALM and mood:
+            base = ""
+        parts = [p for p in (base, mood) if p]
+        if float((drives or {}).get("duty", 0.0)) >= 70:
+            parts.append("想找点事做")
+        return "；".join(parts)
+    def _note_event(self, name: str, eff: dict, mult: float) -> None:
+        """记一笔"刚才因为什么变了"，给面板的「最近的变化」用。"""
+        try:
+            rows = list(self.state.get("recent_events") or [])
+            top = sorted(
+                ((k, float(v) * mult) for k, v in (eff or {}).items() if float(v)),
+                key=lambda kv: -abs(kv[1]),
+            )[:3]
+            rows.append(
+                {
+                    "n": name,
+                    "cn": EVENT_CN.get(name, name),
+                    "ts": time.time(),
+                    "d": {k: round(v, 1) for k, v in top},
+                }
+            )
+            self.state["recent_events"] = rows[-8:]
+        except Exception:
+            pass
+
     def _push_recent(self, role: str, text: str) -> None:
         if not text:
             return
@@ -1563,7 +1686,8 @@ class EmotionCore(Star):
             "umo": str(st.get("umo") or ""),
             "mode": mode,
             "mode_cn": MODE_CN.get(mode, ""),
-            "hint": MODE_HINT.get(mode, ""),
+            "mood_cn": mood_label(st.get("drives") or {}),
+            "hint": self._hint_text(mode, st.get("drives") or {}),
             "blame": float(st.get("blame_pressure", 0.0) or 0.0),
             "expectation": float(st.get("expectation", 0.0) or 0.0),
             "drives": {k: float(drives.get(k, 0.0) or 0.0) for k in DRIVES},
@@ -1595,7 +1719,18 @@ class EmotionCore(Star):
                 ),
                 "target_umo": str(self._cfg("proactive.target_umo", "")),
                 "segment_reply": bool(self._cfg("proactive.segment_reply", True)),
+                "thought_min_weight": float(self._cfg("thought.min_weight", 0.2)),
+                "thought_push": float(self._cfg("thought.proactive_push", 0.15)),
             },
+            "recent_events": [
+                {
+                    "n": str(e.get("n") or ""),
+                    "cn": str(e.get("cn") or e.get("n") or ""),
+                    "ts": float(e.get("ts", 0) or 0),
+                    "d": e.get("d") or {},
+                }
+                for e in (st.get("recent_events") or [])[-8:]
+            ],
         }
 
     async def _recent_history_pairs(self, umo: str, limit: int = 20) -> list[dict]:

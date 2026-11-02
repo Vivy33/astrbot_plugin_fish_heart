@@ -218,6 +218,13 @@ body::before {
 }
 
 /* 亮色下浅青字压在浅底上会糊掉，换成更深的同色系 */
+.badge.mood {
+  background: transparent;
+  border-color: var(--line-strong);
+  color: var(--muted);
+}
+.badge.mood::before { display: none; }
+
 [data-theme="light"] .badge {
   background: rgba(255, 255, 255, 0.88);
   border-color: color-mix(in srgb, var(--mode) 45%, transparent);
@@ -356,8 +363,8 @@ body::before {
 }
 .ring .dial {
   --p: 0;
-  width: 92px;
-  height: 92px;
+  width: 70px;
+  height: 70px;
   border-radius: 50%;
   display: grid;
   place-items: center;
@@ -369,7 +376,7 @@ body::before {
 .ring .dial::before {
   content: "";
   position: absolute;
-  inset: 8px;
+  inset: 7px;
   border-radius: 50%;
   background: var(--card-b);
   backdrop-filter: blur(6px);
@@ -385,10 +392,10 @@ body::before {
 .ring .cap em { font-style: normal; color: var(--dim); }
 
 /* ---------- 细条 ---------- */
-.meters { position: relative; z-index: 1; display: grid; gap: 11px; }
-.meter { display: grid; grid-template-columns: 58px 1fr 40px; align-items: center; gap: 10px; font-size: 12px; }
+.meters { position: relative; z-index: 1; display: grid; gap: 5px; }
+.meter { display: grid; grid-template-columns: 54px 1fr 38px; align-items: center; gap: 10px; font-size: 11.5px; }
 .meter .name { color: var(--muted); }
-.meter .bar { height: 6px; border-radius: 99px; background: var(--track); overflow: hidden; }
+.meter .bar { height: 5px; border-radius: 99px; background: var(--track); overflow: hidden; }
 .meter .bar i {
   display: block; height: 100%; border-radius: 99px;
   background: linear-gradient(90deg, color-mix(in srgb, var(--mode) 55%, transparent), var(--mode));
@@ -403,7 +410,7 @@ body::before {
   display: flex;
   gap: 9px;
   margin: auto 0 0;
-  padding: 12px 14px;
+  padding: 9px 12px;
   border-radius: 12px;
   border: 1px dashed var(--line-strong);
   background: linear-gradient(90deg, var(--mode-soft), transparent 85%);
@@ -414,7 +421,39 @@ body::before {
 .tendency b { flex: 0 0 auto; color: var(--text); font-weight: 600; }
 
 /* ---------- 念头 ---------- */
-.thought-list { position: relative; z-index: 1; flex: 1; min-height: 0; overflow-y: auto; align-content: start; list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; scrollbar-width: thin; }
+.thought-list { position: relative; z-index: 1; flex: 0 1 auto; max-height: 150px; min-height: 0; overflow-y: auto; align-content: start; list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; scrollbar-width: thin; }
+
+/* 「最近的变化」：念头卡的下半区 */
+.sub-head { margin-top: 12px; }
+.sub-head h3 { margin: 0; font-size: 12px; font-weight: 620; color: var(--muted); letter-spacing: 0.04em; }
+.event-list {
+  position: relative;
+  z-index: 1;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  align-content: start;
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 2px;
+  scrollbar-width: thin;
+  mask-image: linear-gradient(to bottom, #000 88%, transparent);
+}
+.event-list li {
+  display: grid;
+  grid-template-columns: 58px 1fr auto;
+  gap: 8px;
+  align-items: baseline;
+  padding: 5px 0;
+  font-size: 11.5px;
+  border-bottom: 1px dashed var(--line);
+}
+.event-list li:last-child { border-bottom: none; }
+.event-list .ev-name { color: var(--text); font-weight: 620; }
+.event-list .ev-delta { color: var(--muted); font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.event-list .ev-time { color: var(--dim); white-space: nowrap; }
 .thought {
   padding: 12px 14px;
   border-radius: 13px;
@@ -513,6 +552,7 @@ body::before {
   display: grid;
   gap: 12px;
   flex: 1;
+  align-content: start;
   min-height: 0;
   overflow-y: auto;
   scrollbar-width: thin;

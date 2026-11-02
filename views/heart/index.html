@@ -24,6 +24,7 @@
     </div>
     <div class="topbar-right">
       <span class="badge" id="modeBadge" data-mode="calm">—</span>
+        <span class="badge mood" id="moodBadge">—</span>
       <button class="ghost-btn" id="btnRefresh" type="button">
         <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 2v3h-3" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
         刷新
@@ -58,6 +59,9 @@
     <div class="card-head"><h2>心头的念头</h2><span class="hint" id="thoughtCount">0 条</span></div>
     <ul class="thought-list" id="thoughtList"></ul>
     <p class="empty" id="thoughtEmpty">她这会儿什么都没惦记。</p>
+    <div class="card-head sub-head"><h3>最近的变化</h3><span class="hint" id="eventHint">她为什么变</span></div>
+    <ul class="event-list" id="eventList"></ul>
+    <p class="empty" id="eventEmpty">还没有记录到变化。</p>
   </section>
 
   <section class="card card-proactive">
