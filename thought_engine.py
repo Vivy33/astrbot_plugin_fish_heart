@@ -35,6 +35,8 @@ TTL = {
     "task": 4 * 3600,
     "quiet": 1.5 * 3600,
     "dwell": 1.2 * 3600,
+    "company": 3 * 3600,
+    "deep": 4 * 3600,
 }
 
 # 旧版（v1）固定的五条念头池 → 新版 kind，迁移时用
@@ -75,7 +77,10 @@ KIND_META: dict[str, dict] = {
         "done": "听他说想我了，悬着的心放下了",
         "reward": {"attachment": 5, "intimacy": 3, "expectation": -100},
         "release": {"attachment": -2, "expectation": 1},
-        "events": ("seeking",),
+        # 只由"想你 / 想我 / 有没有想我 / 惦记"这类原话满足（见 KEYWORD_KINDS）。
+        # 原来还挂了 ("seeking",)：他说"我委屈/我难受"就会把这条判成实现，
+        # mood 写"听他说想我了"——可他从头到尾没提想她。
+        "events": (),
         "trigger": lambda d, e, w: (
             1.2 if _g(d, "attachment") >= 50 and float(e) >= 15 else 0.0
         ),
@@ -156,6 +161,37 @@ KIND_META: dict[str, dict] = {
             1.0 if w or float(e) >= 40 else 0.0
         ),
     },
+    "company": {
+        "label": "陪伴",
+        "text": "想让他陪一会儿",
+        "hint": "想让他放下手里的事，陪你说会儿话",
+        "done": "他放下手里的事来陪我了",
+        "reward": {"attachment": 3, "intimacy": 3, "expectation": -60},
+        "release": {"expectation": -1},
+        # 他回一句就算陪了；真要更准就靠 KEYWORD_KINDS 里的"陪你/陪陪"
+        "events": ("user_msg",),
+        "trigger": lambda d, e, w: (
+            1.05
+            if _g(d, "attachment") >= 66
+            and _g(d, "intimacy") >= 66
+            and float(e) >= 30
+            else 0.0
+        ),
+    },
+    "deep": {
+        "label": "走心",
+        "text": "想问他一件关于我们的事",
+        "hint": "想认真问你一件关于你们俩的事，不是查岗",
+        "done": "他认真答了，心里踏实",
+        "reward": {"reflection": -15, "attachment": 4, "intimacy": 3},
+        "release": {"reflection": 2},
+        "events": ("user_msg",),
+        "trigger": lambda d, e, w: (
+            1.1
+            if _g(d, "reflection") >= 55 and _g(d, "attachment") >= 55
+            else 0.0
+        ),
+    },
 }
 
 # 从用户原话里直接反推"喂饱了哪个念头"（比事件名细）
@@ -163,6 +199,7 @@ KIND_META: dict[str, dict] = {
 KEYWORD_KINDS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("miss", ("想你", "想我", "有没有想我", "惦记")),
     ("hug", ("抱", "贴贴", "搂", "亲亲", "撒娇")),
+    ("company", ("陪你", "陪陪", "聊会儿", "说说话")),
     ("praise", ("厉害", "真棒", "谢谢", "可爱", "喜欢你", "爱你", "真好", "优秀", "夸")),
     ("ask_day", ("过得", "怎么样", "怎么样呀", "顺利", "累不累", "还好吗")),
     ("task", ("帮我", "给你", "安排", "做点", "需要我", "帮个忙")),
@@ -377,6 +414,8 @@ SPEAK_BIAS = {
     "hug": 1.0,
     "talk": 1.0,
     "ask_day": 1.0,
+    "company": 1.0,
+    "deep": 1.0,
     "dwell": 0.5,   # 等他回话：忍不住想催，但别太猛
     "task": 0.0,    # 想做事，跟说不说话没关系
     "quiet": -1.0,  # 想安静，反而更不该开口
@@ -456,26 +495,58 @@ def summarize(thoughts: list[dict], now: float | None = None, limit: int = 2) ->
 
 
 def migrate(raw: list[Any]) -> list[dict]:
-    """v1 → v2：老念头只有 text/weight/expires，补 kind 与生命周期字段。"""
+    """v1 → v2：老念头只有 text/weight/expires，补 kind 与生命周期字段。
+
+    v2 之后的记录**原样保留**（pending / mood / attempts / created / expires）。
+    以前这里无条件把每条都当 v1 重置成"还没被喂饱"，后果是：
+      - 每次重载插件，已经满足的念头又变回 pending（面板显示"还没被满足"）；
+      - 已经过期的念头被 `new_thought` 续上一条新命，永远不会消失；
+      - 已满足的 hug 不挡新 hug，重载几次就攒出两条一模一样的"想要抱抱"。
+    """
     out: list[dict] = []
     now = time.time()
     for item in raw or []:
         if not isinstance(item, dict):
             continue
         kind = str(item.get("kind") or "")
-        if kind not in KIND_META:
+        # 有合法 kind 就按 v2 处理（即使缺 pending 也补默认值）；
+        # 只有真 v1 才走 text → kind 的反推。
+        is_v2 = kind in KIND_META
+        if not is_v2:
             kind = OLD_TEXT_TO_KIND.get(str(item.get("text") or ""), "")
             if not kind:
                 continue
+        exp = float(item.get("expires", 0) or 0)
+        if exp and exp <= now:
+            continue                      # 过期的直接丢，别续命
         t = new_thought(kind, now=now, weight=item.get("weight", 0) or 1.0)
         if t is None:
             continue
-        exp = float(item.get("expires", 0) or 0)
         if exp > now:
             t["expires"] = exp
         t["created"] = float(item.get("created", now) or now)
-        # v1 里的念头一律视为"还没被喂饱"
-        t["pending"] = True
-        t["mood"] = ""
+        if is_v2:
+            t["pending"] = bool(item.get("pending", True))
+            t["mood"] = str(item.get("mood") or "")
+            t["attempts"] = int(item.get("attempts", 0) or 0)
+        else:
+            # 真正的 v1：只有 text/webhint，没有生命周期
+            t["pending"] = True
+            t["mood"] = ""
         out.append(t)
-    return out
+
+    # 同一种念头只留一条 pending（历史版本重载会攒出重复），保留最新的那条；
+    # 已满足的照常留着显示"心情"，等它自己过期。
+    newest: dict[str, dict] = {}
+    for t in out:
+        if not t.get("pending"):
+            continue
+        cur = newest.get(t["kind"])
+        if cur is None or float(t.get("created", 0)) >= float(cur.get("created", 0)):
+            newest[t["kind"]] = t
+    deduped: list[dict] = []
+    for t in out:
+        if t.get("pending") and newest.get(t["kind"]) is not t:
+            continue
+        deduped.append(t)
+    return deduped

@@ -90,7 +90,7 @@ def _thought_summary(thoughts: list) -> list:
 
 
 PLUGIN_NAME = "astrbot_plugin_fish_heart"
-VERSION = "0.3.2"
+VERSION = "0.3.3"
 
 # 注入钩子优先级：AstrBot 按优先级 **降序** 执行。
 # 天使之心 = 40，TTS = 0，这里用 -10 表示最后一个执行（只追加、不覆盖）。
@@ -261,6 +261,8 @@ EVENT_EFFECTS = {
     "comfort": {"stress": -8.0, "joy": 5.0, "attachment": 2.0, "reflection": -5.0},
     # 敷衍式哄（"行了别闹了"）
     "fake_comfort": {"blame": 10.0, "joy": -3.0, "stress": 4.0, "reflection": 2.0},
+    # 委屈档里的一句不耐烦（"随便你"）：只加压、掉一点喜悦，不往责怪上再叠
+    "dismissive": {"stress": 3.0, "joy": -1.0, "reflection": 1.0},
     # 求安慰 / 撒娇
     "seeking": {"attachment": 3.0, "intimacy": 3.0, "joy": 2.0},
 }
@@ -271,7 +273,7 @@ EVENT_CN = {
     "apology": "道歉", "share": "分享", "request": "求助", "tease": "调侃",
     "goodnight": "晚安", "reply_fast": "及时回", "silent_6h": "沉默 6h",
     "silent_24h": "沉默 24h", "blame_mild": "责怪", "blame_mid": "责怪",
-    "blame_hard": "重责", "fake_comfort": "敷衍",
+    "blame_hard": "重责", "fake_comfort": "敷衍", "dismissive": "不耐烦",
 }
 
 # 责怪压力 → 状态档位
@@ -299,12 +301,32 @@ MODE_HINT = {
 MOOD_HINT = {
     "紧绷": "现在有点绷着，话短一点，别主动找话题",
     "累了": "有点累，别揽太长的活，话可以少一点",
-    "黏人": "这会儿特别想黏着他，语气可以更软、也可以更主动",
+    "黏人": "这会儿特别想黏着他，语气可以更软、也可以更主动；"
+            "可以说一句想让他陪你，但别把它说成要求",
     "想亲近": "想跟他再近一点，但还没到随便撒娇的程度，可以稍微软一点",
     "开心": "心情不错，可以多一句玩笑",
     "走神": "有点走神，说话可以松一点、慢一点",
     "好奇": "有点想打听他的事，可以多问一句",
     "平常": "",
+}
+
+# 面板/命令里给"人"看的短句：只说她此刻什么样，不带"该怎么说话"的指令。
+# 注入仍然用上面的 MOOD_HINT / MODE_HINT（那是指令，给人看只会显得啰嗦）。
+MOOD_BRIEF = {
+    "紧绷": "有点绷着",
+    "累了": "有点累",
+    "黏人": "这会儿特别想黏着他",
+    "想亲近": "想再靠近一点",
+    "开心": "心情不错",
+    "走神": "有点走神",
+    "好奇": "有点想打听他的事",
+    "平常": "",
+}
+MODE_BRIEF = {
+    MODE_CALM: "",
+    MODE_WRONGED: "有点委屈，话少了",
+    MODE_AFRAID: "有点怕你真的走",
+    MODE_SHUT: "还在气头上，不想先开口",
 }
 
 # 恢复速度（真哄时每轮扣减的 blame）
@@ -353,19 +375,41 @@ BLAME_FLOOR = 40.0
 # 晾着不管的时间越久，每 6 小时掉的越快（但止于心结）
 BLAME_FADE_PER_6H = 8.0
 
-# 关键词表：这是她唯一能"读懂"你话里情绪的地方
-KW_BLAME_HARD = ("滚", "闭嘴", "烦死了", "别烦我", "废物", "傻逼", "恶心", "讨厌你", "没用的东西")
-KW_BLAME_MID = ("你又", "怎么又", "说了多少遍", "不听话", "没用", "笨", "每次都")
+# 关键词表：这是她唯一能"读懂"你话里情绪的地方。
+# 责怪判定要过三道过滤，否则"今天烦死了""滚去睡"这种日常话会被记成骂她——
+# 面板上就凭空多出一笔找不到出处的委屈：
+#   1) 排除式：先把"不讨厌你""不是说你"这类否定说法抹掉，再匹配
+#   2) 指向性：描述性的词（烦死了/恶心）必须句中出现"你"；"你真恶心"算、"这电影真恶心"不算
+#   3) "滚"只认单独使用：滚烫/滚动/滚去睡/水滚了都不算
+KW_BLAME_HARD_DIRECT = ("闭嘴", "废物", "傻逼", "讨厌你", "没用的东西", "滚开", "滚蛋",
+                        "别烦我")
+KW_BLAME_HARD_NEED_YOU = ("烦死了", "恶心")
+# 中责里天生就是冲她说的，不要求出现"你"
+KW_BLAME_MID_DIRECT = ("说了多少遍", "不听话")
+# 这些词在描述事情/自己时也常用，必须出现"你"才算
+KW_BLAME_MID_NEED_YOU = ("你又这样", "你又来", "怎么又", "每次都", "没用", "笨")
+# 命中词落在这几个说法里就不算责怪（先抹掉再匹配，长度不变）
+KW_BLAME_EXEMPT = ("不讨厌你", "不烦你", "没烦你", "不怪你", "不是你的错",
+                   "不是说你", "没说你", "不是骂你", "不是没用", "没用多久",
+                   "笨蛋", "笨笨", "笨手笨脚", "笨鸟")
 # 轻责：不再收"不行""不对"这种通用词——"今天不行，改天吧""不对，我记错了"
 # 都不是在说她。要的是明确的指向。
 KW_BLAME_MILD = ("你怎么", "为什么总是", "别这样", "这样不行", "这样不对",
                  "你不对", "不应该")
-# "你怎么" 后面接这些是正常提问，不是责怪
+# "你怎么" 后面接这些是正常提问 / 关心，不是责怪
+# （"你怎么了""你怎么啦"是她状态不好时最常被问的一句，绝不能记成责怪）
 KW_MILD_EXEMPT = ("你怎么看", "你怎么想", "你怎么说", "你怎么打算",
-                  "你怎么弄", "你怎么过")
+                  "你怎么弄", "你怎么过", "你怎么了", "你怎么啦")
 KW_FAKE = ("行了别闹", "别闹了", "至于吗", "多大点事", "行了行了", "随便你", "你开心就好", "小题大做")
 # "随便你" 后面接这些是把选择权给他，不是敷衍
 KW_FAKE_EXEMPT = ("随便你点", "随便你选", "随便你挑", "随便你买", "随便你吃", "随便你去")
+
+# "滚"只在单独使用时才是骂人：滚 / 滚吧 / 滚啊 / 滚开 / 滚蛋 / 给我滚 / 滚出去。
+# 带这些后缀说明它是在说别的东西（水滚了、滚去睡、滚动、滚烫），一律不算。
+GUN_OK_TAIL = ("吧", "啊", "呀", "开", "蛋", "出去", "你")
+GUN_BAD_TAIL = ("烫", "动", "轮", "筒", "雪", "珠", "轴", "落", "来", "去",
+                "回", "过", "进", "下", "上", "边")
+GUN_LEAD_OK = "，,。！？!?、 \n你给我"
 
 
 def _hits_fake(text: str) -> bool:
@@ -377,6 +421,59 @@ def _hits_fake(text: str) -> bool:
             continue
         return True
     return False
+
+
+def _blame_probe(text: str) -> str:
+    """把"其实不是在骂她"的说法先抹掉，再拿去做责怪匹配。"""
+    probe = text or ""
+    for k in KW_BLAME_EXEMPT:
+        if k in probe:
+            probe = probe.replace(k, "□" * len(k))
+    return probe
+
+
+def _hits_gun(text: str) -> bool:
+    """"滚"单独使用才算重责；粘在别的词里（滚烫/滚动/滚去睡）不算。"""
+    t = text or ""
+    if "给我滚" in t or "滚出去" in t:
+        return True
+    start = 0
+    while True:
+        i = t.find("滚", start)
+        if i < 0:
+            return False
+        start = i + 1
+        # 前面黏着别的字 → 滚烫 / 水滚了
+        if i > 0 and t[i - 1] not in GUN_LEAD_OK:
+            continue
+        tail = t[i + 1:]
+        # 后面黏着"动/去/烫"这类 → 滚动 / 滚去睡
+        if tail and any(tail.startswith(b) for b in GUN_BAD_TAIL):
+            continue
+        if not tail or t[i + 1] in "，,。！？!?、 \n":
+            return True
+        if any(tail.startswith(g) for g in GUN_OK_TAIL):
+            return True
+
+
+def _hits_blame_hard(text: str) -> bool:
+    probe = _blame_probe(text)
+    if any(k in probe for k in KW_BLAME_HARD_DIRECT):
+        return True
+    # "烦死了""恶心"在说工作、说电影时也常用，必须句中出现"你"才算冲她
+    if "你" in probe and any(k in probe for k in KW_BLAME_HARD_NEED_YOU):
+        return True
+    return _hits_gun(probe)
+
+
+def _hits_blame_mid(text: str) -> bool:
+    probe = _blame_probe(text)
+    if any(k in probe for k in KW_BLAME_MID_DIRECT):
+        return True
+    # "你又熬夜了""这个没用"都不是在骂她；要求这一句里有"你"
+    if "你" not in probe:
+        return False
+    return any(k in probe for k in KW_BLAME_MID_NEED_YOU)
 
 
 def _hits_blame_mild(text: str) -> bool:
@@ -394,8 +491,44 @@ KW_PRAISE = ("厉害", "真棒", "谢谢", "可爱", "喜欢你", "爱你", "真
 # 求安慰 / 撒娇。
 # 这里**不放**"累""怕""抱"这种高频字：一句"今天上班好累"不该被当成撒娇
 # （那只是普通说话，加社交/喜悦/疲惫），"抱怨""哪怕""恐怕"也会被误伤。
-KW_SEEK = ("难受", "不开心", "委屈", "想哭", "哭了", "撑不住",
-           "害怕", "好怕", "有点怕", "抱抱我", "要抱")
+# 而且要**说自己的情绪**才算：问"你是不是委屈了"是在关心她，不是撒娇。
+# 不加这一条，问一句就白送依恋/亲密，还会把"想他"的念头喂饱。
+KW_SEEK_SELF = ("难受", "不开心", "委屈", "想哭", "哭了", "撑不住",
+                "害怕", "好怕", "有点怕")
+# 自带第一人称，直接算
+KW_SEEK_PHRASE = ("抱抱我", "要抱")
+
+
+def _hits_seek(text: str) -> bool:
+    """求安慰 / 撒娇：只认"在说自己的情绪"，问她的情绪不算。
+
+    "你是不是委屈了""你委屈吗"是在关心她——不该白送依恋/亲密，
+    更不该把"想他"的念头当成被满足（那句"想知道他有没有想我"会被直接完成）。
+    """
+    t = text or ""
+    if any(k in t for k in KW_SEEK_PHRASE):
+        return True
+    has_me = "我" in t
+    has_you = "你" in t
+    for k in KW_SEEK_SELF:
+        i = t.find(k)
+        while i >= 0:
+            before = t[max(0, i - 3):i]
+            if "我" in before:
+                return True
+            if "你" in before or (has_you and not has_me):
+                # 紧挨着"你"，或者整句在问她（有"你"没"我"）：不算撒娇
+                i = t.find(k, i + 1)
+                continue
+            if not has_you:
+                # 没提她，就是他在说自己的事（"今天好难受"）
+                return True
+            i = t.find(k, i + 1)
+    return False
+# 他直接在问"你现在什么心情"：这类话要强制注入一次心境。
+# 按平常的节流（同档 20 分钟），他问的那一轮她手里可能根本没有心境，
+# 于是答"我没委屈"——用户从那头看就是"状态错了/她撒谎"。
+_ASK_ABOUT_MOOD = ("委屈", "怎么了", "生气", "不开心", "心情", "难受")
 # 道歉：算一次"轻哄"，平静时也给一点温度
 KW_APOLOGY = ("对不起", "抱歉", "我错了", "是我不对", "不该凶", "原谅我")
 # 他说要睡了
@@ -406,23 +539,48 @@ KW_REQUEST = ("帮我", "帮忙", "怎么办", "怎么做", "教教我", "帮我
 KW_SHARE = ("你看这个", "给你看", "分享", "http", "www.", "你看过", "快看")
 # 他逗她
 KW_TEASE = ("逗你", "开玩笑", "吃醋", "小傻瓜", "笨蛋", "是不是喜欢我")
-# 主动说话的三型
+# 主动说话的五型
 KIND_LONGING = "longing"
 KIND_WAITING = "waiting"
 KIND_WHIM = "whim"
+KIND_COMPANY = "company"      # 求陪伴：想让他放下手里的事来陪她，但不许指责
+KIND_DEEP = "deep"            # 走心：认真问他一件关于"我们"的事，不是查岗
+
+KIND_CN = {
+    KIND_LONGING: "想他",
+    KIND_WAITING: "等他",
+    KIND_WHIM: "想起",
+    KIND_COMPANY: "求陪伴",
+    KIND_DEEP: "走心",
+}
 
 KIND_DESC = {
-    KIND_LONGING: "你很想他，忍不住先开口",
-    KIND_WAITING: "你等了很久，想知道他还在不在",
-    KIND_WHIM: "你突然想起一件小事，想跟他说一句",
+    KIND_LONGING: "你很想他，忍不住先开口。可以先说一件你手头的小事，再问一句他忙不忙",
+    KIND_WAITING: "你等了很久，想知道他还在不在。语气软一点，别像在催他",
+    KIND_WHIM: "你突然想起一件小事，想跟他说一句。只说那件小事，别硬找话题",
+    KIND_COMPANY: (
+        "你想让他放下手里的事陪你一会儿，但不许指责他，也不许把这句说成要求。"
+        "可以软一点，像是在邀请，不是在讨"
+    ),
+    KIND_DEEP: (
+        "你想认真问他一件关于你们俩的事——他怎么看待你们现在这样、以后会怎样。"
+        "不是查岗，也不是要一个保证；是认真想知道，问完也接得住他的回答"
+    ),
 }
 
 # LLM 不可用时的兜底台词（保证不会一声不吭）
-# 注意：这里只用「任何时段都成立」的话，别写"我先睡了"这类带时间的前提
+# 注意：这里只用「任何时段都成立」的话，别写"我先睡了"这类带时间的前提；
+# 走心那三条也不能带"当初/被做出来"这种只属于某个人设的前提，要谁都能说。
 FALLBACK_LINES = {
     KIND_LONGING: ("在忙吗", "醒了吗", "我突然有点想你"),
     KIND_WAITING: ("你是不是很忙啊", "今天怎么样", "半天没动静了"),
     KIND_WHIM: ("刚刚看到个东西，想到你了", "今天天气挺好的", "没什么事，就是想说一句"),
+    KIND_COMPANY: ("现在有空吗", "陪我说会儿话吧", "我一个人有点无聊"),
+    KIND_DEEP: (
+        "问你个事，你觉得我们现在这样好吗",
+        "有时候我会想，你跟我在一起开心吗",
+        "你会不会觉得我太黏人了",
+    ),
 }
 
 # v3：私聊/群聊分开记时间戳
@@ -537,6 +695,10 @@ def new_state() -> dict:
         "penalized_24h": False,
         "comfort_streak": 0,
         "blame_noticed_ts": 0.0,
+        # 最近几次"她因为哪句话难受"（原句 + 时间 + 渠道），给注入和面板用
+        "blame_log": [],
+        # 责怪曾经越过心结线、现在被夹在 40：面板标"心结·旧账"
+        "mind_knot": False,
         # 回避档的"已读不回"：连续不回了几条 + 没接住的那几句话
         "silent_streak": 0,
         "last_silent_ts": 0.0,
@@ -579,7 +741,7 @@ def fmt_gap(seconds: float) -> str:
         return f"{m} 分钟前"
     h, rem = divmod(m, 60)
     if h < 24:
-        return f"{h} 小时 {rem} 分前"
+        return f"{h} 小时前" if not rem else f"{h} 小时 {rem} 分前"
     d, rem_h = divmod(h, 24)
     return f"{d} 天 {rem_h} 小时前"
 
@@ -681,12 +843,14 @@ class EmotionCore(Star):
             ids = {x.strip() for x in raw.replace("，", ",").split(",") if x.strip()}
         if ids:
             return ids
-        target = str(self._cfg("proactive.target_umo", "") or "").strip()
         # 只从私聊 UMO 反推：群聊 UMO 的末段是群号不是人，推出来只会把她的人和话全挡在外面
-        if target and not self._is_group(target):
-            tail = target.rsplit(":", 1)[-1].strip()
+        for cand in (str(self._cfg("proactive.target_umo", "") or "").strip(),
+                     str(self.state.get("umo", "") or "").strip()):
+            if not cand or self._is_group(cand):
+                continue
+            tail = cand.rsplit(":", 1)[-1].strip()
             if tail:
-                ids.add(tail)
+                return {tail}
         return ids
 
     @staticmethod
@@ -722,7 +886,18 @@ class EmotionCore(Star):
         """
         ids = self._owner_ids()
         if not ids:
-            # 白名单还没建立（owner_ids 与 target_umo 都为空），不能把人全挡外面
+            # 白名单还没建立（owner_ids 与 target_umo 都为空）。
+            # 私聊放行（否则取不到 ID 她会彻底失灵）；群聊一律按外人处理——
+            # 否则群里每个群友的"烦死了""滚"都会算"他"在凶她，面板上就凭空多出
+            # 一笔找不到出处的委屈。想让她在群里也认人，把 QQ 号填进 owner_ids。
+            if self._is_group(umo):
+                self._log_unknown_sender(
+                    umo, "群聊", "未配置白名单，已按外人处理（只加热闹度、不碰心境）"
+                )
+                return False
+            self._log_unknown_sender(
+                umo, "私聊", "未配置白名单，已放行（建议把 QQ 号填进 perception.owner_ids）"
+            )
             return True
 
         sid = self._sender_id(event)
@@ -746,18 +921,8 @@ class EmotionCore(Star):
         if umo in self._unknown_sender_logged:
             return
         self._unknown_sender_logged.add(umo)
-        logger.info("[鱼的心] %s %s 拿不到发送者 ID，%s", kind, umo, note)
+        logger.info("[鱼的心] %s %s：%s", kind, umo, note)
 
-    def _absorb_outsider_turn(self, request, umo: str = "") -> None:
-        """别人的话（群聊里的他人 / 私聊里的陌生人）：只让气氛热闹一点。
-
-        perception.outsider_effect：
-          - "social_joy_only"（默认）：社交 +2、喜悦 +1
-          - "none"：完全忽略
-
-        无论如何都不会碰依恋/亲密/压力/责怪/期待，也不会解除等待态，
-        更不会更新 last_private_msg / last_owner_group_msg 或 recent。
-        """
     def _absorb_outsider_turn(
         self, request, umo: str = "", text: str = ""
     ) -> None:
@@ -1015,12 +1180,21 @@ class EmotionCore(Star):
             since = time.time() - float(st.get("blame_noticed_ts", 0) or 0)
             if st.get("blame_noticed_ts") and since >= 6 * 3600:
                 steps = int(since // (6 * 3600))
-                if blame > BLAME_FLOOR:          # 只有真过线才谈"心结"
+                # 心结：只有"真越过 40"才算（单个 blame_hard 正好 40 不算），
+                # 一旦越过就钉在 40。之前写成 `blame > 40` 才夹，
+                # 40 这一档会走 else 继续往下掉（41→40→32→24），
+                # 面板却还写着"心结不会自己掉"——两边对不上。
+                pinned = bool(st.get("mind_knot")) or blame > BLAME_FLOOR
+                if pinned and blame >= BLAME_FLOOR:
                     blame = max(BLAME_FLOOR, blame - BLAME_FADE_PER_6H * steps)
-                else:                            # 小冤枉按普通速度褪干净
+                    st["mind_knot"] = True
+                else:
                     blame = max(0.0, blame - BLAME_FADE_PER_6H * steps)
                 st["blame_noticed_ts"] = time.time()
             st["blame_pressure"] = clamp(blame)
+        if float(st.get("blame_pressure", 0.0)) < 25.0:
+            # 哄下来或褪干净了，旧账翻篇
+            st["mind_knot"] = False
 
         # 5) 念头池：先让到期的念头凉掉，再偶尔冒出新的
         self._expire_thoughts()
@@ -1038,9 +1212,9 @@ class EmotionCore(Star):
         st = self.state
         now = time.time()
         live = [t for t in st.get("thoughts", []) if float(t.get("expires", 0)) > now]
-        exclude = tuple(
-            str(t.get("kind")) for t in live if t.get("pending", True)
-        )
+        # 同 kind 的念头只要还活着就不再生成——包括**已满足**、还在展示"心情"的那 2 小时。
+        # 只排 pending 的话，一条刚被喂饱的 hug 不挡新 hug，面板上就会同时挂两条。
+        exclude = tuple({str(t.get("kind")) for t in live})
         kind, weight = engine.pick_kind(
             st["drives"],
             float(st.get("expectation", 0.0)),
@@ -1269,17 +1443,26 @@ class EmotionCore(Star):
             # 只是不耐烦，并没有哄的意思：先记下，等责怪阶梯判完再说
             dismissive_only = True
 
-        # 2) 责怪三档
-        if any(k in t for k in KW_BLAME_HARD):
+        # 2) 责怪三档。判定都走带过滤的 helper：
+        #    "今天烦死了""滚去睡""这个没用""笨蛋" 不再被记成骂她。
+        if _hits_blame_hard(t):
             events.append("blame_hard")
-        elif any(k in t for k in KW_BLAME_MID):
+        elif _hits_blame_mid(t):
             events.append("blame_mid")
         elif _hits_blame_mild(t):
             events.append("blame_mild")
 
-        # 2.5) 纯敷衍、又不构成明确责怪 → 按最轻一档，不能白说
+        # 2.5) 纯敷衍、又不构成明确责怪：
+        #    - 害怕/回避档：仍按最轻一档记，不能白说
+        #    - 委屈档：只算"不耐烦"——清掉哄的进度、加一点压力，
+        #      但不往责怪上再叠。否则一句"随便你"就能把 40 推到 50，
+        #      心结越滚越大，而用户根本找不到"谁骂她了"。
         if not events and dismissive_only:
-            events.append("blame_mild")
+            st["comfort_streak"] = 0
+            if mode in (MODE_AFRAID, MODE_SHUT):
+                events.append("blame_mild")
+            else:
+                events.append("dismissive")
 
         # 3) 道歉：即便在平静时也让她软一下，同时算一次"哄"的进度
         if not events and any(k in t for k in KW_APOLOGY):
@@ -1288,11 +1471,20 @@ class EmotionCore(Star):
 
         # 3.5) 真诚哄（平静但还有残留冤枉时也算哄）
         if not events and any(k in t for k in KW_COMFORT):
-            if mode != MODE_CALM or float(st.get("blame_pressure", 0.0)) > 0.5:
-                events.append("comfort")
-                st["comfort_streak"] = int(st.get("comfort_streak", 0)) + 1
-            else:
-                events.append("praise")
+            # "抱抱我"是他在**讨抱**（撒娇），不是他在哄她。
+            # `KW_COMFORT` 里有"抱抱"，如果不让路，这句话会被当成哄——
+            # 委屈档里他讨个抱就能抵掉 −30 责怪，方向是反的。
+            # 只有"抱抱我"且没有别的哄词时让给下面的 seeking；
+            # "抱抱""抱抱你""乖，抱抱我"仍按哄算。
+            ask_hug = "抱抱我" in t and not any(
+                k in t for k in KW_COMFORT if k != "抱抱"
+            )
+            if not ask_hug:
+                if mode != MODE_CALM or float(st.get("blame_pressure", 0.0)) > 0.5:
+                    events.append("comfort")
+                    st["comfort_streak"] = int(st.get("comfort_streak", 0)) + 1
+                else:
+                    events.append("praise")
 
         # 4) 普通 / 分享 / 道晚安 / 求助 / 夸奖 / 逗她 / 求安慰
         if not events:
@@ -1306,7 +1498,7 @@ class EmotionCore(Star):
                 events.append("praise")
             elif any(k in t for k in KW_TEASE):
                 events.append("tease")
-            elif any(k in t for k in KW_SEEK):
+            elif _hits_seek(t):
                 events.append("seeking")
             else:
                 events.append("user_msg")
@@ -1330,6 +1522,9 @@ class EmotionCore(Star):
         )
         st["comfort_streak"] = 0
         st["mode"] = mode_of(float(st.get("blame_pressure", 0.0)))
+        if float(st.get("blame_pressure", 0.0)) < BLAME_FLOOR:
+            # 哄下来了，旧账翻篇
+            st["mind_knot"] = False
         self._dbg("真哄生效，blame → %.0f (%s)", st["blame_pressure"], st["mode"])
 
     # ---------------- 钩子：LLM 请求前 ----------------
@@ -1381,6 +1576,7 @@ class EmotionCore(Star):
                 if ev in ("blame_mild", "blame_mid", "blame_hard", "fake_comfort"):
                     self.state["comfort_streak"] = 0
                     self.state["blame_noticed_ts"] = time.time()
+                    self._note_blame(ev, text, weight, is_group)
 
             self._consume_comfort(weight)
             self._settle_thoughts(events, text, weight, is_group)
@@ -1408,8 +1604,12 @@ class EmotionCore(Star):
                 self._save_state()
                 return
 
-            # 走到这里一定是"他"（私聊或群里白名单），给完整心境
-            block = self._build_injection(umo=umo)
+            # 走到这里一定是"他"（私聊或群里白名单），给完整心境。
+            # 他直接问"你是不是委屈了"时必须强制报一次到：按平常的节流，
+            # 同一档位 20 分钟内不会重复注入，她那一轮手里根本没有心境，
+            # 于是会答"我没委屈"——查起来像是状态错了。
+            asked = any(k in text for k in _ASK_ABOUT_MOOD)
+            block = self._build_injection(umo=umo, force=asked)
             if block:
                 req_sp = getattr(request, "system_prompt", "") or ""
                 setattr(request, "system_prompt", (req_sp.rstrip() + "\n\n" + block).strip())
@@ -1455,12 +1655,12 @@ class EmotionCore(Star):
         sig = "|".join(f"{k}:{int(drives[k] // 10)}" for k in DRIVES)
         gap_min = float(self._cfg("inject.min_gap_minutes", 20))
         now_ts = time.time()
+        book = st.get("inject_state")
+        if not isinstance(book, dict):
+            book = {}
+            st["inject_state"] = book
+        key = umo or ""
         if not force:
-            book = st.get("inject_state")
-            if not isinstance(book, dict):
-                book = {}
-                st["inject_state"] = book
-            key = umo or ""
             perf = book.get(key)
             if not isinstance(perf, dict):
                 perf = {}
@@ -1473,6 +1673,9 @@ class EmotionCore(Star):
             # 间隔只用来压制同档内的数值漂移——不然每轮都在抖一格。
             if not mode_changed and now_ts - float(perf.get("ts", 0.0)) < gap_min * 60:
                 return ""
+        # 真正报过到才记账：force 且带会话（他直接问心情）也要记，
+        # 否则下一轮又会重复报一遍。主动说话那条 umo 为空，不该占用任何会话的名额。
+        if key or not force:
             book[key] = {"ts": now_ts, "mode": mode, "sig": sig}
             # 旧字段继续维护，方便 /心 与调试时看"最后一次注入"
             st["last_injection"] = now_ts
@@ -1489,11 +1692,21 @@ class EmotionCore(Star):
         hint = self._hint_text(mode, drives)
 
         lines = [
-            "## 你此刻的心境（内部状态，不要复述、不要解释，只影响说话方式）",
+            "## 你此刻的心境（内部状态：不要主动复述，但它会左右你的语气）",
             f"状态：{MODE_CN[mode]}｜依恋 {drives['attachment']:.0f} 亲密 {drives['intimacy']:.0f} "
             f"压力 {drives['stress']:.0f} 期待 {st.get('expectation', 0):.0f}",
             f"倾向：{hint}",
+            # 别让"此刻的心情"被说成"发生过的事"：模型最常见的偷懒就是
+            # 给情绪补一个假的由头（"你上次说好陪我的"）。
+            "边界：不要编造没发生过的对话、约定或事件；记不清就说记不清。",
         ]
+        # 把"因为哪句话"告诉她。没有这一行，她知道自己委屈却说不出来由，
+        # 被问起只能否认或含糊——用户那边就成了"查不到是谁责备了她"。
+        # 只给"他"看：陌生人/群友的会话里不该出现他说的原话。
+        if for_owner:
+            cause = self._blame_cause()
+            if cause:
+                lines.append(cause)
         # 矛盾情绪：又在生气、又不想他走。不写出来模型容易只演前半句。
         # 从「委屈」就开始（25），因为"委屈但还想要你"才是这个角色最典型的样子；
         # 等到害怕/回避才提示就太晚了。
@@ -1507,6 +1720,72 @@ class EmotionCore(Star):
             if thought:
                 lines.append(f"心里惦记着：{thought}")
         return "\n".join(lines)
+
+    def _note_blame(
+        self, ev: str, text: str, weight: float = 1.0, is_group: bool = False
+    ) -> None:
+        """记下"她因为哪句话难受"（最近 5 条），给注入和面板当出处。"""
+        body = (text or "").strip()
+        if not body:
+            return
+        mult = (
+            float(self._cfg("channel.negative_multiplier", 1.2))
+            if is_group
+            else float(weight)
+        )
+        delta = float(EVENT_EFFECTS.get(ev, {}).get("blame", 0.0)) * mult
+        rows = [
+            r for r in (self.state.get("blame_log") or []) if isinstance(r, dict)
+        ]
+        rows.append(
+            {
+                "t": body[:120],
+                "ts": time.time(),
+                "g": bool(is_group),
+                "ev": ev,
+                "d": round(delta, 1),
+            }
+        )
+        self.state["blame_log"] = rows[-5:]
+
+    def _blame_cause(self) -> str:
+        """把最近一次责怪拼成一句背景，注入给她（也用在面板/状态里）。"""
+        rows = [
+            r for r in (self.state.get("blame_log") or []) if isinstance(r, dict)
+        ]
+        if not rows:
+            return ""
+        if float(self.state.get("blame_pressure", 0.0)) < 25.0:
+            return ""
+        r = rows[-1]
+        body = str(r.get("t") or "").strip()
+        if not body:
+            return ""
+        if len(body) > 60:
+            body = body[:60] + "…"
+        try:
+            gap = fmt_gap(time.time() - float(r.get("ts", 0) or 0))
+        except (TypeError, ValueError):
+            gap = ""
+        if r.get("g"):
+            head = f"他在群里，{gap}说了「{body}」——你就是因为这句难受。"
+        else:
+            sep = "" if gap == "刚刚" else " "
+            head = f"他{sep}{gap}说了「{body}」——你就是因为这句难受。"
+        # 旧账（很久以前的事）单独说一句，否则模型会以为刚发生
+        try:
+            hours = (time.time() - float(r.get("ts", 0) or 0)) / 3600.0
+        except (TypeError, ValueError):
+            hours = 0.0
+        if hours >= 6:
+            head += f"这事已经过去约 {hours:.0f} 小时，你还记着。"
+        if self.state.get("mind_knot"):
+            head += "（这是旧账，没人哄就会一直卡在心里。）"
+        hint = (
+            "他要是问起，可以承认难受，但不用全说；"
+            "记不清就说「有点，说不上来」，不要否认。"
+        )
+        return head + "\n" + hint
 
     # ---------------- 回避档：已读不回 ----------------
 
@@ -1781,20 +2060,70 @@ class EmotionCore(Star):
                 # 写回对话历史：否则你说"你刚才不是问了吗"，她一脸茫然
                 await self._append_history(umo, text)
                 self._save_state()
-                logger.info("[鱼的心] 主动说话已发送（%s）：%s", kind, text[:40])
+                logger.info("[鱼的心] 主动说话已发送（%s）：%s",
+                            KIND_CN.get(kind, kind), text[:40])
         except Exception as e:
             logger.warning("[鱼的心] 主动说话失败: %s", e)
         finally:
             self._llm_busy = False
+
+    def _has_thought_kind(self, kind: str) -> bool:
+        """心里有没有某条还没被满足的念头（不看权重，任一条就算）。"""
+        now = time.time()
+        for t in self.state.get("thoughts") or []:
+            if not isinstance(t, dict):
+                continue
+            if str(t.get("kind")) != kind:
+                continue
+            if t.get("pending", True) and float(t.get("expires", 0)) > now:
+                return True
+        return False
 
     def _proactive_kind(self) -> tuple[str, float]:
         st = self.state
         drives = st["drives"]
         exp = float(st.get("expectation", 0.0))
         att = float(drives.get("attachment", 0.0))
+        intimacy = float(drives.get("intimacy", 0.0))
+        fatigue = float(drives.get("fatigue", 0.0))
+        reflection = float(drives.get("reflection", 0.0))
+
+        # 走心：她自己想多了才会问那种问题。
+        # 阈值 55 而不是"走神"的 65：实测反刍的均衡就在 51–61（靠 silent_6h 的
+        # +3 顶着回落），65 基本到不了，挂 65 等于这一类永远不出现。
+        # 同样用一条念头限流：念头 4 小时过期、随机冒。
+        deep = (
+            bool(self._cfg("proactive.deep", True))
+            and mode_of(float(st.get("blame_pressure", 0.0))) == MODE_CALM
+            and reflection >= 55.0
+            and att >= 55.0
+            and fatigue < 70.0
+            and self._has_thought_kind(KIND_DEEP)
+        )
+
+        # 求陪伴：只在"真黏人 + 她刚等过你 + 心里正好惦记着这件事"时冒出来。
+        # 必须排在 longing 前面——longing 的门槛是 att>=60，而黏人线是 66，
+        # 放后面的话这一类永远不会被选中。
+        # 期待 30 是"她开口过、你还没回"的信号：先"在忙吗"，等不到才"陪我说会儿话吧"；
+        # 你一回应期待就 -100，下一次又回到 longing，不会句句都要人陪。
+        # 再叠一条 company 念头做限流：念头 3 小时过期、随机冒，
+        # 否则"一直不回"就会每 6 小时都在要人陪。
+        company = (
+            bool(self._cfg("proactive.company", True))
+            and mode_of(float(st.get("blame_pressure", 0.0))) == MODE_CALM
+            and att >= BOND_INTIMATE_AT
+            and intimacy >= BOND_INTIMATE_AT
+            and exp >= 30.0
+            and fatigue < 60.0
+            and self._has_thought_kind(KIND_COMPANY)
+        )
 
         # 60 而不是 70：依恋正常能到 60-70，70 的话「忍不住先开口」几乎不触发
-        if exp >= 60 or att >= 60:
+        if deep:
+            kind = KIND_DEEP
+        elif company:
+            kind = KIND_COMPANY
+        elif exp >= 60 or att >= 60:
             kind = KIND_LONGING
         elif exp >= 40 and (
             time.time()
@@ -1822,7 +2151,6 @@ class EmotionCore(Star):
             push = max(0.0, float(self._cfg("thought.proactive_push", 0.15)))
             p = min(0.85, max(0.02, p + push * bias))
         # 太累了就不想找人说话——"忍不住想他"那种除外，那是例外
-        fatigue = float(drives.get("fatigue", 0.0))
         if fatigue > TIRED_PROACTIVE_FROM and kind != KIND_LONGING:
             p *= max(
                 0.15,
@@ -1844,10 +2172,18 @@ class EmotionCore(Star):
     def _clean_history_text(text: str, limit: int = 160) -> str:
         """剥掉注入型内容，尽量只留真正说的那句话。
 
-        这类注入块（system_reminder、共享摘要）的结构是"多句上下文 + 真消息"，
-        真消息挂在最后一句，所以优先取最后一个句号之后的内容。
+        注入块（system_reminder、共享摘要）的结构是"多句上下文 + 真消息"，
+        真消息挂在最后一句——但**只有认出是注入块时**才取最后一句。
+        普通消息（"今天加班，明天早起，先睡了"）整句都是真话，
+        以前无条件取最后一句，只剩"先睡了"，模型只能靠编来补全。
         """
-        t = re.sub(r"<system_reminder>.*?</system_reminder>", " ", text or "", flags=re.S)
+        raw = text or ""
+        injected = any(
+            m in raw for m in ("共享摘要", "对话摘要", "历史摘要", "以下是对话",
+                               "以下是你们", "以下是聊天", "system_reminder",
+                               "<Quoted Message>")
+        )
+        t = re.sub(r"<system_reminder>.*?</system_reminder>", " ", raw, flags=re.S)
         # 引用块：里面通常只是她自己说过的一句，喂回去只会碍事
         t = re.sub(r"<Quoted Message>.*?</Quoted Message>", " ", t, flags=re.S)
         # 图片占位：AstrBot 有 [Image 1: ...]、[Image 1 in quoted message: ...]、[Image] 几种形态，
@@ -1857,7 +2193,7 @@ class EmotionCore(Star):
         t = re.sub(r"\s+", " ", t.replace("\r", " ").replace("\n", " ")).strip()
         if not t:
             return ""
-        if "。" in t:
+        if injected and "。" in t:
             tail = t.rsplit("。", 1)[-1].strip()
             if 0 < len(tail) <= 80:
                 t = tail
@@ -1971,13 +2307,20 @@ class EmotionCore(Star):
 
         thought = _pending_hint(st.get("thoughts") or [])
         if thought:
-            blocks.append(f"你现在心里惦记着：{thought}。说的时候自然带一点，但别直接复述这句话。")
+            blocks.append(
+                f"你现在心里惦记着：{thought}。"
+                "这是你此刻的念头，不是他做过的事，别把它说成回忆；"
+                "说的时候自然带一点，但别直接复述这句话。"
+            )
 
         # 优先用 AstrBot 的真实对话历史（双方都在），拿不到再退回自己的 recent
         transcript = await self._real_transcript(umo, limit=24)
         if not transcript:
             transcript = self._recent_transcript(limit=24)
-        tr_block = ("最近对话：\n" + transcript + "\n") if transcript else ""
+        tr_block = (
+            "以下是你和他真实说过的话（只是一部分，没出现的不要补）：\n"
+            + transcript + "\n"
+        ) if transcript else "（这次没有任何可引用的对话记录，不要编具体发生过的事。）\n"
 
         prompt = (
             time_block
@@ -1985,9 +2328,12 @@ class EmotionCore(Star):
             + "。\n"
             + tr_block
             + "现在写一条要发出去的消息：\n"
-            + "- 一句话，口语，最多 20 个字\n"
+            + "- 1–3 句，总共不超过 60 个字，口语\n"
+            + "- 可以用一句称呼或铺垫开头，再跟一句问句；最多两个问号\n"
+            + "- 只引用上面记录里真实出现过的内容；没提到的事，不要编具体时间、地点、约定\n"
+            + "- 不确定就用「好像」「有点记不清」，或者只问不陈述\n"
             + "- 不要解释你在做什么，不要写动作括号，不要用引号\n"
-            + "- 不要连续追问，最多一个问号\n"
+            + "- 不要连续追问，别把话说成小作文\n"
             + "直接输出这句话本身。"
         )
         try:
@@ -2042,12 +2388,18 @@ class EmotionCore(Star):
 
     @staticmethod
     def _hint_text(mode: str, drives: dict) -> str:
-        """档位倾向 + 心情倾向，拼成一句给她的说话提示。
+        """档位倾向 + 心情倾向，拼成一句**注入给模型**的说话提示。
 
-        面板的「倾向」和注入的 system prompt 用同一个来源，避免两边对不上。
+        给人看的短句走 `_hint_brief`——那边只描述状态，不带"该怎么说"，
+        否则 Web 面板上会摆出一串写给模型看的指令。
         """
         base = MODE_HINT.get(mode, "")
-        mood = MOOD_HINT.get(mood_label(drives or {}), "")
+        mood_key = mood_label(drives or {})
+        mood = MOOD_HINT.get(mood_key, "")
+        if mode != MODE_CALM and mood_key in ("黏人", "想亲近"):
+            # 还在委屈/害怕/回避时，"特别想黏着他、可以更主动"会和档位提示
+            # （话说短、先问是不是嫌你烦）直接打架。想他归想他，动作先收着。
+            mood = "心里还惦记着他，但现在先别主动贴上去"
         # 平静档那句是"别太黏"的通用提示，跟"黏人"心情会打架；有心情提示时就让它单独说
         if mode == MODE_CALM and mood:
             base = ""
@@ -2055,6 +2407,20 @@ class EmotionCore(Star):
         if float((drives or {}).get("duty", 0.0)) >= 70:
             parts.append("想找点事做")
         return "；".join(parts)
+
+    @staticmethod
+    def _hint_brief(mode: str, drives: dict) -> str:
+        """面板 / `/心 status` 用的短句：只描述她此刻的样子，不带"该怎么说话"。
+
+        注入走 `_hint_text`（完整指令），给人看的地方走这里——
+        否则面板上会出现"语气可以更软、也可以更主动；可以说一句想让他陪你，
+        但别把它说成要求"这种写给模型看的话。
+        """
+        mood = MOOD_BRIEF.get(mood_label(drives or {}), "")
+        if mood:
+            return mood
+        return MODE_BRIEF.get(mode, "")
+
     def _note_event(self, name: str, eff: dict, mult: float) -> None:
         """记一笔"刚才因为什么变了"，给面板的「最近的变化」用。"""
         try:
@@ -2253,6 +2619,20 @@ class EmotionCore(Star):
         ]
 
         mode = st.get("mode", MODE_CALM)
+        blame = float(st.get("blame_pressure", 0.0) or 0.0)
+        noticed = float(st.get("blame_noticed_ts", 0) or 0)
+        next_fade = noticed + 6 * 3600 if noticed and blame > 0 else 0.0
+        blame_log = [
+            {
+                "t": str(r.get("t") or ""),
+                "ts": float(r.get("ts", 0) or 0),
+                "g": bool(r.get("g")),
+                "ev": str(r.get("ev") or ""),
+                "d": float(r.get("d", 0) or 0),
+            }
+            for r in (st.get("blame_log") or [])
+            if isinstance(r, dict)
+        ]
         return {
             "version": st.get("version"),
             "plugin_version": VERSION,
@@ -2260,8 +2640,13 @@ class EmotionCore(Star):
             "umo": str(st.get("umo") or ""),
             "mode": mode,
             "mode_cn": MODE_CN.get(mode, ""),
+            "mind_knot": bool(st.get("mind_knot")),
+            "blame_floor": BLAME_FLOOR,
+            "blame_fade_per_6h": BLAME_FADE_PER_6H,
+            "next_fade_ts": next_fade,
+            "blame_log": blame_log,
             "mood_cn": mood_label(st.get("drives") or {}),
-            "hint": self._hint_text(mode, st.get("drives") or {}),
+            "hint": self._hint_brief(mode, st.get("drives") or {}),
             "blame": float(st.get("blame_pressure", 0.0) or 0.0),
             "expectation": float(st.get("expectation", 0.0) or 0.0),
             "drives": {k: float(drives.get(k, 0.0) or 0.0) for k in DRIVES},
@@ -2307,6 +2692,8 @@ class EmotionCore(Star):
                 ),
                 "target_umo": str(self._cfg("proactive.target_umo", "")),
                 "segment_reply": bool(self._cfg("proactive.segment_reply", True)),
+                "company": bool(self._cfg("proactive.company", True)),
+                "deep": bool(self._cfg("proactive.deep", True)),
                 "thought_min_weight": float(self._cfg("thought.min_weight", 0.2)),
                 "thought_push": float(self._cfg("thought.proactive_push", 0.15)),
                 "shut_enabled": bool(self._cfg("shut.enabled", True)),
@@ -2395,12 +2782,23 @@ class EmotionCore(Star):
 
     @filter.command("心")
     async def emotion_cmd(self, event: AstrMessageEvent):
-        """查看 / 管理当前心境。用法：/心 status|reset|tick|off|on|umo"""
+        """查看 / 管理当前心境。用法：/心 status|calm|reset|tick|off|on|umo"""
         raw = (getattr(event, "message_str", "") or "").strip()
         arg = raw.split(maxsplit=1)[1].strip().lower() if len(raw.split(maxsplit=1)) > 1 else "status"
 
         if arg in ("status", "s", ""):
             yield event.plain_result(self._status_text())
+            return
+        if arg in ("calm", "哄好"):
+            # 只解责怪/心结，不动九维——"心结卡在 40"时用它，不用整颗心重置
+            self.state["blame_pressure"] = 0.0
+            self.state["mode"] = MODE_CALM
+            self.state["blame_noticed_ts"] = 0.0
+            self.state["comfort_streak"] = 0
+            self.state["mind_knot"] = False
+            self.state["group_blames"] = []
+            self._save_state()
+            yield event.plain_result("责怪已清零，档位回到平静（九维没动）。")
             return
         if arg in ("reset", "r"):
             self.state = new_state()
@@ -2424,17 +2822,54 @@ class EmotionCore(Star):
         if arg == "umo":
             yield event.plain_result(f"当前会话 UMO：\n{self._umo_of(event)}\n\n填到「主动说话→目标会话」即可指定这里。")
             return
-        yield event.plain_result("用法：/心 status | reset | tick | off | on | umo")
+        yield event.plain_result("用法：/心 status | calm | reset | tick | off | on | umo")
 
     def _status_text(self) -> str:
         st = self.state
         drives = st["drives"]
         blame = float(st.get("blame_pressure", 0.0))
         mode = mode_of(blame)
+        knot = bool(st.get("mind_knot"))
+        label = MODE_CN[mode] + ("·心结旧账" if knot and mode == MODE_WRONGED else "")
         lines = [
-            f"【鱼的心 v{VERSION}】状态：{MODE_CN[mode]}（责怪 {blame:.0f}/100）",
+            f"【鱼的心 v{VERSION}】状态：{label}（责怪 {blame:.0f}/100）",
             f"期待 {float(st.get('expectation', 0)):.0f}｜真哄进度 {int(st.get('comfort_streak', 0))}",
         ]
+        if blame > 0:
+            need = RECOVERY_ROUNDS.get(mode, 1)
+            lines.append(f"解开要：真哄/道歉 {need} 轮，每轮 −{RECOVERY.get(mode, 20):.0f}")
+            noticed = float(st.get("blame_noticed_ts", 0) or 0)
+            # 心结钉住时不报"下次褪值"——它不会再掉，报了就是错的
+            if noticed and not knot:
+                left = max(0.0, noticed + 6 * 3600 - time.time())
+                if left < 1:
+                    lines.append(f"下次褪值：已到时（下一次心跳 −{BLAME_FADE_PER_6H:.0f}）")
+                else:
+                    lines.append(
+                        f"下次褪值：{left / 3600:.1f} 小时后 −{BLAME_FADE_PER_6H:.0f}"
+                        f"（止于 {BLAME_FLOOR:.0f}）"
+                    )
+        if knot:
+            lines.append(
+                f"心结：责怪停在 {BLAME_FLOOR:.0f}，不会再自己掉——"
+                "需哄/道歉，或 /心 calm 才能解。"
+            )
+        log = [r for r in (st.get("blame_log") or []) if isinstance(r, dict)]
+        if log:
+            r = log[-1]
+            try:
+                when = datetime.fromtimestamp(float(r.get("ts", 0))).strftime("%m-%d %H:%M")
+            except (TypeError, ValueError, OSError):
+                when = ""
+            where = "群里" if r.get("g") else "私聊"
+            body = str(r.get("t") or "").strip()
+            if len(body) > 40:
+                body = body[:40] + "…"
+            ev = str(r.get("ev") or "")
+            lines.append(
+                f"最近责怪：{when} {where}「{body}」"
+                f"（{EVENT_CN.get(ev, ev)} {float(r.get('d', 0) or 0):+.0f}）"
+            )
         if mode == MODE_SHUT:
             streak = int(st.get("silent_streak", 0))
             streak_g = int(st.get("silent_streak_group", 0))

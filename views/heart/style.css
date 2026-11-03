@@ -52,6 +52,10 @@
 
 html, body { height: 100%; }
 
+/* hidden 必须真的隐藏：组件样式里的 display:flex / grid 优先级比 UA 的
+   [hidden]{display:none} 高，之前"空白的责怪框""错误卡片还占位"都是这个原因 */
+[hidden] { display: none !important; }
+
 body {
   margin: 0;
   padding: 30px clamp(16px, 4vw, 48px) 60px;
@@ -265,7 +269,10 @@ body::before {
   position: relative;
   display: flex;
   flex-direction: column;
-  height: 392px;
+  /* 六张卡片固定同高：行高由 grid 拉平，但「最近说过的话」内容会无限长，
+     必须靠内部滚动而不是把整张卡撑高。416 是「此刻」放得下
+     倾向两行 + 责怪一行的最小高度。 */
+  height: 416px;
   min-height: 0;
   padding: 20px 22px 20px;
   border-radius: var(--radius);
@@ -287,6 +294,10 @@ body::before {
   pointer-events: none;
 }
 .card:hover { border-color: var(--line-strong); }
+
+/* 「此刻」内容最多（环 + 7 条 + 倾向/责怪）：万一还是超高，宁可让卡片内部滚，
+   也不要像以前那样直接被 overflow:hidden 切掉半行 */
+.card-vitals { overflow-y: auto; scrollbar-width: thin; }
 
 .card:nth-child(1) { animation-delay: 0.02s; }
 .card:nth-child(2) { animation-delay: 0.06s; }
@@ -344,6 +355,8 @@ body::before {
   color: var(--muted);
 }
 .legend span { display: inline-flex; align-items: center; gap: 5px; }
+.legend em { font-style: normal; }
+.legend b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
 .legend i { width: 6px; height: 6px; border-radius: 50%; background: var(--mode); opacity: 0.7; }
 
 /* ---------- 四环 ---------- */
@@ -429,7 +442,8 @@ body::before {
   position: relative;
   z-index: 1;
   display: flex;
-  gap: 9px;
+  flex-direction: column;
+  gap: 6px;
   margin: auto 0 0;
   padding: 9px 12px;
   border-radius: 12px;
@@ -438,6 +452,11 @@ body::before {
   font-size: 12.5px;
   color: var(--muted);
   line-height: 1.5;
+}
+.tendency-row { display: flex; gap: 9px; }
+.tendency-row + .tendency-row {
+  padding-top: 6px;
+  border-top: 1px dashed var(--line);
 }
 .tendency b { flex: 0 0 auto; color: var(--text); font-weight: 600; }
 
@@ -573,6 +592,10 @@ body::before {
   display: grid;
   gap: 12px;
   flex: 1;
+  min-height: 0;
+  /* 卡片是固定高度：消息多了要在这里滚，不能把整行撑高 */
+  overflow-y: auto;
+  scrollbar-width: thin;
   align-content: start;
   min-height: 0;
   overflow-y: auto;
@@ -664,7 +687,7 @@ body::before {
 /* ---------- 响应式 ---------- */
 @media (max-width: 1180px) {
   .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .card { height: 380px; }
+  .card { height: 404px; }
 }
 @media (max-width: 820px) {
   body { padding: 18px 14px 44px; }

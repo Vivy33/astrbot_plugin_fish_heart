@@ -391,13 +391,58 @@
       });
   }
 
-  function applyMode(mode) {
+  function applyMode(mode, knot) {
     const m = MODES[mode] || MODES.calm;
     document.documentElement.style.setProperty("--mode", m.color);
     document.documentElement.style.setProperty("--mode-soft", hexToSoft(m.color));
     const badge = $("modeBadge");
-    badge.textContent = m.cn;
+    // 心结：责怪被夹在 40，档位会永远停在「委屈」。不标出来，
+    // 用户只会看到一个找不到出处的委屈徽章。
+    const stuck = !!knot && mode === "wronged";
+    badge.textContent = stuck ? `${m.cn}·旧账` : m.cn;
     badge.dataset.mode = mode;
+    badge.title = stuck
+      ? "责怪已经停在 40（心结），不会再自己往下掉：哄/道歉，或 /心 calm 才能解"
+      : "";
+  }
+
+  /** 责怪那一行：数值 + 心结说明 + 最近一次责怪的原句（她"说不出来由"时就靠它）。
+   *  返回空串表示这一行不该出现——和「倾向」合并在同一个虚线框里，不再单独占一块。 */
+  function blameInfo(d) {
+    const blame = Number(d.blame || 0);
+    if (!(blame > 0)) return "";
+    const parts = [`${Math.round(blame)}/100`];
+    const fade = Number(d.blame_fade_per_6h || 8);
+    if (d.mind_knot) {
+      parts.push("心结：不哄不会掉（/心 calm 可解）");
+    } else if (d.next_fade_ts) {
+      const left = Math.max(0, Number(d.next_fade_ts) - Number(d.now || 0));
+      parts.push(left > 0 ? `${fmtSpan(left)}后 −${fade}` : `下一次心跳 −${fade}`);
+    }
+    const log = Array.isArray(d.blame_log) ? d.blame_log : [];
+    const last = log[log.length - 1];
+    if (last && last.t) {
+      const where = last.g ? "群里" : "私聊";
+      const text = last.t.length > 24 ? `${last.t.slice(0, 24)}…` : last.t;
+      parts.push(`最近：${fmtClock(last.ts)} ${where}「${text}」`);
+    }
+    return parts.join(" · ");
+  }
+
+  /** 九维图例：把九个轴的名字和当前值列出来，避免"责任/责怪"这种误会 */
+  function renderRadarLegend(d) {
+    const box = $("radarLegend");
+    box.replaceChildren();
+    DRIVE_ORDER.forEach((k) => {
+      const v = Number((d.drives || {})[k]) || 0;
+      const dm = Number((d.display_max || {})[k]) || 100;
+      const pct = Math.round(Math.min(100, (v / dm) * 100));
+      const s = document.createElement("span");
+      s.innerHTML = `<i></i><em></em> <b>${pct}</b>`;
+      s.querySelector("em").textContent =
+        (d.drives_cn && d.drives_cn[k]) || k;
+      box.appendChild(s);
+    });
   }
 
   function hexToSoft(hex) {
@@ -417,20 +462,26 @@
   }
 
   function render(d) {
-    applyMode(d.mode);
+    applyMode(d.mode, d.mind_knot);
     document.body.dataset.mode = d.mode;
 
     const ver = d.plugin_version ? `v${d.plugin_version} · ` : "";
+    const knot = d.mind_knot && d.mode === "wronged" ? "（心结·旧账）" : "";
     $("subtitle").textContent =
-      `${ver}此刻${MODES[d.mode]?.cn || ""} · 期待 ${Math.round(d.expectation)} · 责怪 ${Math.round(d.blame)}`;
+      `${ver}此刻${MODES[d.mode]?.cn || ""}${knot} · 期待 ${Math.round(d.expectation)} · 责怪 ${Math.round(d.blame)}`;
     $("tickHint").textContent = `心跳 ${fmtAgo(d.last_tick)}`;
 
     const hint = d.hint || "";
-    $("tendency").hidden = !hint;
+    const blameText = blameInfo(d);
+    $("tendencyRow").hidden = !hint;
     $("tendencyText").textContent = hint;
+    $("blameLine").hidden = !blameText;
+    $("blameText").textContent = blameText;
+    $("tendency").hidden = !hint && !blameText;
 
     const drives = { ...d.drives, _cn: d.drives_cn || {}, _max: d.display_max || {} };
     guard("雷达", () => drawRadar(drives));
+    guard("图例", () => renderRadarLegend(d));
     guard("此刻", () => renderVitals(d));
     guard("念头", () => renderThoughts(d.thoughts || []));
     guard("主动说话", () => renderProactive(d));
