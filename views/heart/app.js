@@ -280,8 +280,15 @@
       ["冷却", `${cfg.cooldown_hours}h`],
       ["每日上限", `${cfg.daily_limit}`],
       ["刚聊过不打扰", `${cfg.min_idle_minutes}min`],
-      ["睡眠", cfg.quiet_hours || "不限"],
+      ["作息", d.sleep?.enabled
+        ? (d.sleep.asleep
+          ? `睡着（${d.sleep.wake} 起）`
+          : `${d.sleep.bedtime}-${d.sleep.wake}${d.sleep.stay_up ? " 熬夜" : ""}`)
+        : "关"],
       ["分段发送", cfg.segment_reply ? "开" : "关"],
+      ["群聊全员", cfg.group_everyone
+        ? `开 正×${cfg.group_scale ?? 0.5} 负×${cfg.group_negative_scale ?? 0.8}`
+        : "关"],
       ["念头", d.thought_enabled ? "开" : "关"],
       ["入池门槛", `${cfg.thought_min_weight ?? 0.2}`],
       ["念头加成", `+${cfg.thought_push ?? 0.15}`],
@@ -308,8 +315,8 @@
       readiness = cfg.shut_enabled === false
         ? "她在回避：主动说话被冻结，但「已读不回」已关闭，你说话她照常回。"
         : `她在回避：主动说话被冻结；私聊 ${d.silent_streak || 0}/${cap} 条（这一条回 ${pct}%）、群聊 ${d.silent_streak_group || 0}/${cap} 条不回。`;
-    } else if (cfg.quiet_active) {
-      readiness = `现在是睡眠时段（${cfg.quiet_hours || "—"}），到点之后才会考虑开口。`;
+    } else if (d.sleep?.asleep) {
+      readiness = `她睡着了（${d.sleep.bedtime}-${d.sleep.wake}${d.sleep.stay_up ? "，今晚熬夜" : ""}），${d.sleep.wake} 之后才可能开口。`;
     } else if (remain > 0) {
       readiness = `冷却中，还要等 ${fmtSpan(remain)}。`;
     } else if (d.proactive_count >= Number(cfg.daily_limit ?? 99)) {

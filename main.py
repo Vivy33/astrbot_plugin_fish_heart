@@ -90,7 +90,7 @@ def _thought_summary(thoughts: list) -> list:
 
 
 PLUGIN_NAME = "astrbot_plugin_fish_heart"
-VERSION = "0.3.3"
+VERSION = "0.3.4"
 
 # 注入钩子优先级：AstrBot 按优先级 **降序** 执行。
 # 天使之心 = 40，TTS = 0，这里用 -10 表示最后一个执行（只追加、不覆盖）。
@@ -265,6 +265,8 @@ EVENT_EFFECTS = {
     "dismissive": {"stress": 3.0, "joy": -1.0, "reflection": 1.0},
     # 求安慰 / 撒娇
     "seeking": {"attachment": 3.0, "intimacy": 3.0, "joy": 2.0},
+    # 睡觉时被消息吵醒：不算责怪，只是困 + 有点烦
+    "woken": {"stress": 2.0, "joy": -1.0, "fatigue": 1.0, "reflection": 1.0},
 }
 
 # 事件的中文名（面板「最近的变化」用）
@@ -274,6 +276,7 @@ EVENT_CN = {
     "goodnight": "晚安", "reply_fast": "及时回", "silent_6h": "沉默 6h",
     "silent_24h": "沉默 24h", "blame_mild": "责怪", "blame_mid": "责怪",
     "blame_hard": "重责", "fake_comfort": "敷衍", "dismissive": "不耐烦",
+    "woken": "被吵醒",
 }
 
 # 责怪压力 → 状态档位
@@ -652,24 +655,6 @@ def parse_clock(text: str) -> tuple[int, int] | None:
     return None
 
 
-def in_quiet_hours(now: datetime, spec: str) -> bool:
-    """判断是否处于睡眠时段，支持跨零点（如 01:30-07:30）。"""
-    if not spec or "-" not in spec:
-        return False
-    left, _, right = spec.partition("-")
-    a, b = parse_clock(left), parse_clock(right)
-    if not a or not b:
-        return False
-    cur = now.hour * 60 + now.minute
-    start = a[0] * 60 + a[1]
-    end = b[0] * 60 + b[1]
-    if start == end:
-        return False
-    if start < end:
-        return start <= cur < end
-    return cur >= start or cur < end
-
-
 def new_state() -> dict:
     return {
         "version": STATE_VERSION,
@@ -699,6 +684,10 @@ def new_state() -> dict:
         "blame_log": [],
         # 责怪曾经越过心结线、现在被夹在 40：面板标"心结·旧账"
         "mind_knot": False,
+        # 作息：今天熬不熬夜（每天掷一次）、上次被消息吵醒的时间
+        "sleep_day": "",
+        "sleep_stay_up": False,
+        "last_woken_ts": 0.0,
         # 回避档的"已读不回"：连续不回了几条 + 没接住的那几句话
         "silent_streak": 0,
         "last_silent_ts": 0.0,
@@ -819,8 +808,16 @@ class EmotionCore(Star):
             return 1.0
 
         base = float(self._cfg("channel.group_base_weight", 0.35))
-        last_private = float(self.state.get("last_private_msg", 0.0) or 0.0)
-        hours = (time.time() - last_private) / 3600.0 if last_private else 1e9
+        if bool(self._cfg("perception.group_everyone", False)):
+            # 群友模式：纯群聊部署可能很久没私聊过，衰减基准改看群里的最近发言，
+            # 否则所有人都被压在 0.25 档，等于没影响
+            last_active = max(
+                float(self.state.get("last_private_msg", 0.0) or 0.0),
+                float(self.state.get("last_owner_group_msg", 0.0) or 0.0),
+            )
+        else:
+            last_active = float(self.state.get("last_private_msg", 0.0) or 0.0)
+        hours = (time.time() - last_active) / 3600.0 if last_active else 1e9
 
         if hours < 6:
             factor = 1.0
@@ -876,6 +873,25 @@ class EmotionCore(Star):
             pass
         return ""
 
+    @classmethod
+    def _sender_label(cls, event: AstrMessageEvent) -> str:
+        """群聊里给发言人一个短标签：优先群名片/昵称，其次 QQ 号。
+
+        群友模式下要靠它区分"在跟一个人说"还是"在跟几个人说"。
+        """
+        try:
+            obj = getattr(event, "message_obj", None)
+            sender = getattr(obj, "sender", None) if obj is not None else None
+            if sender is not None:
+                for attr in ("card", "nickname", "user_id", "id"):
+                    value = getattr(sender, attr, None)
+                    if value:
+                        return re.sub(r"\s+", " ", str(value)).strip()[:20]
+        except Exception:
+            pass
+        sid = cls._sender_id(event)
+        return sid[:20] if sid else ""
+
     def _is_owner(self, event: AstrMessageEvent, umo: str) -> bool:
         """谁能影响她的心：私聊与群聊都按白名单判定。
 
@@ -883,7 +899,15 @@ class EmotionCore(Star):
         取不到发送者 ID 时策略不同——
           群聊：保守当外人（宁可少认，也不让陌生人写心）
           私聊：放行（否则一旦取不到 ID，她就彻底失灵了）
+
+        例外：开了 `perception.group_everyone` 的"群友模式"后，群聊里谁都算"他"
+        （给纯群聊部署用；影响强度由 `perception.group_scale` 再打折）。
         """
+        if self._is_group(umo) and bool(
+            self._cfg("perception.group_everyone", False)
+        ):
+            return True
+
         ids = self._owner_ids()
         if not ids:
             # 白名单还没建立（owner_ids 与 target_umo 都为空）。
@@ -924,7 +948,7 @@ class EmotionCore(Star):
         logger.info("[鱼的心] %s %s：%s", kind, umo, note)
 
     def _absorb_outsider_turn(
-        self, request, umo: str = "", text: str = ""
+        self, request, umo: str = "", text: str = "", who: str = ""
     ) -> None:
         """别人的话（群聊里的他人 / 私聊里的陌生人）：只让气氛热闹一点。
 
@@ -946,7 +970,7 @@ class EmotionCore(Star):
             return
         if umo and self._is_group(umo):
             # 记一笔"群友说了什么"：只作前因背景，不动她的心
-            self._note_group_tail("other", text)
+            self._note_group_tail("other", text, who)
         drives = self.state["drives"]
         heat = self._heat_factor("outsider")
         for k, dv in (("social", 2.0), ("joy", 1.0)):
@@ -1349,9 +1373,22 @@ class EmotionCore(Star):
         st = self.state
         drives = st["drives"]
 
-        # 好事按渠道权重缩水；坏事在群里不打折，反而加重
+        # 好事按渠道权重缩水；坏事在群里按自己的系数走。
+        # 群友模式：正向再乘 group_scale（默认 0.5）压难度，
+        # 负向单独用 group_negative_scale（默认 0.8）——比私聊轻，但不能按 0.5 再折，
+        # 否则几十个人的群凶她一句，比私聊还轻，反而"越骂越没事"。
         mult = weight
-        if is_group and name in NEGATIVE_EVENTS:
+        if is_group and bool(self._cfg("perception.group_everyone", False)):
+            if name in NEGATIVE_EVENTS:
+                mult = clamp(
+                    float(self._cfg("perception.group_negative_scale", 0.8)),
+                    0.05, 1.5,
+                )
+            else:
+                mult *= clamp(
+                    float(self._cfg("perception.group_scale", 0.5)), 0.05, 1.0
+                )
+        elif is_group and name in NEGATIVE_EVENTS:
             mult = float(self._cfg("channel.negative_multiplier", 1.2))
 
         blame_before = float(st.get("blame_pressure", 0.0))
@@ -1544,7 +1581,10 @@ class EmotionCore(Star):
             if not self._is_owner(event, umo):
                 # 不是"他"说的话：只让气氛热闹一点，其余一律不碰
                 self._absorb_outsider_turn(
-                    request, umo, (getattr(event, "message_str", "") or "").strip()
+                    request,
+                    umo,
+                    (getattr(event, "message_str", "") or "").strip(),
+                    self._sender_label(event),
                 )
                 return
 
@@ -1587,6 +1627,10 @@ class EmotionCore(Star):
                 self.state["last_owner_group_msg"] = now
             else:
                 self.state["last_private_msg"] = now
+            # 作息：她睡着时被消息吵醒。半小时内只算一次，免得连发几条把她
+            # 越吵越烦；这一下不加责怪，只是困 + 有点烦。
+            if self._sleep_info(datetime.now()).get("asleep"):
+                self._note_woken(now)
             self.state["mode"] = mode_of(float(self.state.get("blame_pressure", 0.0)))
             if not is_group:
                 # 最近对话只记私聊：主动说话是发给私聊的，别把群聊混进去
@@ -1596,7 +1640,7 @@ class EmotionCore(Star):
                     # 群里被凶：先快照"前因"（此刻 tail 里还没有这一句），
                     # 否则切到私聊她只知道"被罚了"、不知道为什么。
                     self._note_group_blame(text)
-                self._note_group_tail("owner", text)
+                self._note_group_tail("owner", text, self._sender_label(event))
 
             # 回避档：允许她"看见了不回"。必须放在注入之前——被无视的这一轮
             # 不能占用心境报到的名额，否则她下一条真回复会以为自己已经知道心境了。
@@ -1614,6 +1658,16 @@ class EmotionCore(Star):
                 req_sp = getattr(request, "system_prompt", "") or ""
                 setattr(request, "system_prompt", (req_sp.rstrip() + "\n\n" + block).strip())
                 self._dbg("已注入心境: %s", block.replace("\n", " / "))
+
+            # 睡眠状态单独注入：它不受心境节流影响，睡着时每一轮都要让她知道
+            sleep_block = self._sleep_injection(datetime.now())
+            if sleep_block:
+                req_sp = getattr(request, "system_prompt", "") or ""
+                setattr(
+                    request,
+                    "system_prompt",
+                    (req_sp.rstrip() + "\n\n" + sleep_block).strip(),
+                )
 
             # 她沉默那几条不会进 AstrBot 的对话历史（请求被终止了），
             # 所以在这里把"没接住的话"补给她，免得她真的失忆。
@@ -1733,6 +1787,11 @@ class EmotionCore(Star):
             if is_group
             else float(weight)
         )
+        if is_group and bool(self._cfg("perception.group_everyone", False)):
+            mult = clamp(
+                float(self._cfg("perception.group_negative_scale", 0.8)),
+                0.05, 1.5,
+            )
         delta = float(EVENT_EFFECTS.get(ev, {}).get("blame", 0.0)) * mult
         rows = [
             r for r in (self.state.get("blame_log") or []) if isinstance(r, dict)
@@ -1903,11 +1962,12 @@ class EmotionCore(Star):
 
     # ---------------- 群聊 → 私聊 的桥 ----------------
 
-    def _note_group_tail(self, role: str, text: str) -> None:
+    def _note_group_tail(self, role: str, text: str, who: str = "") -> None:
         """记一条群聊流水（谁说的 + 说了什么），只保留最近几条。
 
         role: "owner" 是他、"her" 是她自己、"other" 是群友。
-        这条流水本身不注入，只有在他凶她的那一刻才被快照成"前因"。
+        who：群聊里的显示名/QQ 号——群友模式下要靠它区分"对一个人说"还是
+        "对几个人说"；不传就按 role 的默认称呼。
         """
         body = (text or "").strip()
         if not body:
@@ -1915,8 +1975,27 @@ class EmotionCore(Star):
         rows = [
             r for r in (self.state.get("group_tail") or []) if isinstance(r, dict)
         ]
-        rows.append({"r": role, "t": body[:120], "ts": time.time()})
+        row = {"r": role, "t": body[:120], "ts": time.time()}
+        if who:
+            row["who"] = str(who)[:20]
+        rows.append(row)
         self.state["group_tail"] = rows[-GROUP_TAIL_CAP:]
+
+    def _group_tail_text(self, limit: int = 8) -> str:
+        """把群聊流水拼成"谁：说了什么"，给群友模式的主动说话判断对象用。"""
+        rows = [
+            r for r in (self.state.get("group_tail") or []) if isinstance(r, dict)
+        ]
+        out: list[str] = []
+        for r in rows[-limit:]:
+            role = str(r.get("r") or "")
+            who = str(r.get("who") or "").strip() or {
+                "owner": "他", "her": "你", "other": "群友"
+            }.get(role, "群友")
+            body = str(r.get("t") or "").strip()
+            if body:
+                out.append(f"{who}：{body}")
+        return "\n".join(out)
 
     def _note_group_blame(self, text: str) -> None:
         """留住群里被凶的那一句，外加它前面那几条——她要知道"因为什么"。"""
@@ -1992,13 +2071,29 @@ class EmotionCore(Star):
 
     # ---------------- 主动说话 ----------------
 
+    def _proactive_target(self) -> str:
+        """主动说话发到哪。
+
+        群友模式：**只发群，绝不发私聊**——目标会话填的是群就用它，否则用最近
+        活跃的群会话；还没有任何群消息时返回空（宁可不发，也不去私聊）。
+        普通模式：保持原样，target_umo 优先、否则最近会话。
+        """
+        st = self.state
+        target = str(self._cfg("proactive.target_umo", "") or "").strip()
+        if bool(self._cfg("perception.group_everyone", False)):
+            if target and self._is_group(target):
+                return target
+            last = str(st.get("umo") or "").strip()
+            return last if self._is_group(last) else ""
+        return (target or str(st.get("umo") or "")).strip()
+
     async def _maybe_proactive(self, catch_up: bool = False) -> None:
         if not self._cfg("proactive.enabled", True):
             return
         if self._llm_busy:
             return
         st = self.state
-        umo = (self._cfg("proactive.target_umo", "") or st.get("umo") or "").strip()
+        umo = self._proactive_target()
         if not umo:
             self._dbg("没有可用会话，跳过主动说话")
             return
@@ -2008,6 +2103,10 @@ class EmotionCore(Star):
         if mode == MODE_SHUT:
             # 回避状态是硬约束：补发也不破例，否则重启会让她在封闭状态下开口
             self._dbg("状态=回避，暂停主动说话")
+            return
+        # 作息：睡着时绝不主动开口（哪怕在补发）
+        if self._sleep_info(datetime.now()).get("asleep"):
+            self._dbg("她睡着了，暂停主动说话")
             return
 
         # 冷却
@@ -2024,17 +2123,21 @@ class EmotionCore(Star):
             return
         # 刚聊过就别打扰
         idle_min = float(self._cfg("proactive.min_idle_minutes", 10))
-        # 只按"私聊"算沉默：群里别人聊天不该推迟她私聊的主动
-        last_private = float(
-            st.get("last_private_msg", st.get("last_user_msg", 0.0)) or 0.0
-        )
-        if now - last_private < idle_min * 60:
+        # 只按"私聊"算沉默：群里别人聊天不该推迟她私聊的主动。
+        # 群友模式 + 目标是群：改按群里最近一次说话算（否则纯群聊会被永远判"刚聊过"）。
+        if self._is_group(umo) and bool(
+            self._cfg("perception.group_everyone", False)
+        ):
+            last_active = max(
+                float(st.get("last_private_msg", 0.0) or 0.0),
+                float(st.get("last_owner_group_msg", 0.0) or 0.0),
+            )
+        else:
+            last_active = float(
+                st.get("last_private_msg", st.get("last_user_msg", 0.0)) or 0.0
+            )
+        if now - last_active < idle_min * 60:
             return
-        # 睡眠时段：补发也要遵守，否则凌晨重启就会半夜发消息
-        quiet = str(self._cfg("proactive.quiet_hours", "01:30-07:30"))
-        if in_quiet_hours(datetime.now(), quiet):
-            return
-
         kind, prob = self._proactive_kind()
         if not catch_up and random.random() >= prob:
             self._dbg("主动说话未命中概率（%s p=%.2f）", kind, prob)
@@ -2288,6 +2391,9 @@ class EmotionCore(Star):
         # 时间锚点：跟 AstrBot 内置的时间感知同一套格式（<system_reminder> + Current datetime）
         # 主动说话没有用户消息，模型推不出"上一次说话多久以前"，所以把这两个时间点摆明
         his_last = float(st.get("last_private_msg", 0) or 0)
+        if self._is_group(umo):
+            # 目标是群时，"上次说话"以群里最近一次发言为准；没有群记录才退回私聊时间
+            his_last = float(st.get("last_owner_group_msg", 0) or 0) or his_last
         her_last = float(st.get("last_proactive", 0) or 0)
         reminder = (
             f"Current datetime: {now:%Y-%m-%d %H:%M} ({now.tzname() or 'local'}), "
@@ -2322,11 +2428,25 @@ class EmotionCore(Star):
             + transcript + "\n"
         ) if transcript else "（这次没有任何可引用的对话记录，不要编具体发生过的事。）\n"
 
+        # 群友模式：这是群聊，听众可能是某一个人，也可能是好几个人。
+        # 把带发言人的流水一起给她，让她自己判断该用“你”还是“你们”。
+        group_block = ""
+        if self._is_group(umo):
+            group_block = (
+                "这是群聊：下面可能有他，也可能有群友。先判断你是在对一个人说，"
+                "还是对几个人说——只有明确一个对象时才用「你」；"
+                "不确定或明显有几个人，就用「你们」或者干脆不点名。\n"
+            )
+            tail = self._group_tail_text()
+            if tail:
+                group_block += "群里最近的发言（标注了是谁说的）：\n" + tail + "\n"
+
         prompt = (
             time_block
             + KIND_DESC.get(kind, "你想跟他说一句")
             + "。\n"
             + tr_block
+            + group_block
             + "现在写一条要发出去的消息：\n"
             + "- 1–3 句，总共不超过 60 个字，口语\n"
             + "- 可以用一句称呼或铺垫开头，再跟一句问句；最多两个问号\n"
@@ -2420,6 +2540,130 @@ class EmotionCore(Star):
         if mood:
             return mood
         return MODE_BRIEF.get(mode, "")
+
+    # ---------------- 作息 ----------------
+
+    def _sleep_info(self, now: datetime | None = None) -> dict:
+        """她现在的作息：睡没睡、几点睡/起、今晚有没有熬夜。
+
+        每天第一次调用时掷一次"今天熬不熬夜"（`sleep.stay_up_chance`），
+        熬夜会把入睡时间往后推 `sleep.stay_up_hours` 小时。
+        """
+        now = now or datetime.now()
+        disabled = {
+            "enabled": False, "asleep": False, "bedtime": "", "wake": "",
+            "stay_up": False, "wake_ts": 0.0,
+        }
+        if not self._cfg("sleep.enabled", True):
+            return disabled
+        bedtime = parse_clock(str(self._cfg("sleep.bedtime", "23:30")))
+        wake = parse_clock(str(self._cfg("sleep.wake", "07:30")))
+        if not bedtime or not wake:
+            return disabled
+
+        st = self.state
+        cur = now.hour * 60 + now.minute
+        b0 = bedtime[0] * 60 + bedtime[1]
+        w = wake[0] * 60 + wake[1]
+        # 归属"哪一晚"：起床前还算昨晚的作息，否则 00:10 会用今天刚掷的
+        # 熬夜结果，把昨晚已经睡下的人判成醒着。
+        plan_day = now.strftime("%Y-%m-%d")
+        if cur < w:
+            plan_day = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+        if st.get("sleep_day") != plan_day:
+            st["sleep_day"] = plan_day
+            chance = min(
+                1.0, max(0.0, float(self._cfg("sleep.stay_up_chance", 0.2)))
+            )
+            st["sleep_stay_up"] = random.random() < chance
+        stay_up = bool(st.get("sleep_stay_up"))
+
+        b = b0
+        if stay_up:
+            shift = max(0, int(float(self._cfg("sleep.stay_up_hours", 2.0)) * 60))
+            b = (b0 + shift) % 1440
+            # 熬夜把整段睡眠挤没了就按原时间睡（避免 bedtime+wake 配出 20 小时睡眠）
+            if (w - b) % 1440 < 60:
+                b = b0
+                stay_up = False
+        if b == w:
+            asleep = False
+        elif b < w:
+            asleep = b <= cur < w
+        else:
+            asleep = cur >= b or cur < w
+
+        # 下一次起床时间（用于"还能睡多久"）
+        wake_dt = now.replace(hour=w // 60, minute=w % 60, second=0, microsecond=0)
+        if wake_dt <= now:
+            wake_dt += timedelta(days=1)
+        return {
+            "enabled": True,
+            "asleep": asleep,
+            "bedtime": f"{b // 60:02d}:{b % 60:02d}",
+            "wake": f"{w // 60:02d}:{w % 60:02d}",
+            "stay_up": stay_up,
+            "wake_ts": wake_dt.timestamp(),
+        }
+
+    def _sleep_injection(self, now: datetime | None = None) -> str:
+        """她睡着时被消息吵醒，按九维给她一段"被吵醒"的状态说明。"""
+        if not self._cfg("inject.enabled", True):
+            return ""
+        now = now or datetime.now()
+        info = self._sleep_info(now)
+        if not info.get("asleep"):
+            return ""
+        d = self.state["drives"]
+        fatigue = int(float(d.get("fatigue", 0)))
+        stress = int(float(d.get("stress", 0)))
+        attachment = int(float(d.get("attachment", 0)))
+        intimacy = int(float(d.get("intimacy", 0)))
+        joy = int(float(d.get("joy", 0)))
+
+        left_min = max(0, int((info["wake_ts"] - now.timestamp()) // 60))
+        left = (
+            f"{left_min // 60} 小时 {left_min % 60} 分"
+            if left_min >= 60 else f"{left_min} 分钟"
+        )
+        lines = [
+            "## 你正在睡觉（被消息吵醒）",
+            f"现在是 {now:%H:%M}，你 {info['bedtime']} 就睡了，"
+            f"离 {info['wake']} 起床还有 {left}。",
+        ]
+        if info.get("stay_up"):
+            lines.append("你今晚熬夜了，本来就睡得晚，现在更困。")
+        if fatigue >= 70:
+            lines.append(
+                f"你困得不行（疲惫 {fatigue}）：回得很短、有点迷糊，句子可以不完整。"
+            )
+        elif stress >= 50:
+            lines.append(
+                f"被吵醒让你有点烦（压力 {stress}）：语气冲一点，别硬撑着客气。"
+            )
+        if attachment >= 66 or intimacy >= 66:
+            lines.append(
+                f"但看到是他（依恋 {attachment}），又有点舍不得凶——"
+                "嘴上嫌烦，还是会回。"
+            )
+        elif joy >= 70:
+            lines.append("你心情还不算差，被吵醒也没真的生气。")
+        lines.append(
+            "不要提“系统/设置/状态”，也别解释自己为什么在睡；"
+            "被吵醒就该有被吵醒的样子。"
+        )
+        return "\n".join(lines)
+
+    def _note_woken(self, now_ts: float | None = None) -> bool:
+        """记一次"被消息吵醒"：30 分钟内只算一次，免得连发几条越吵越烦。"""
+        now_ts = time.time() if now_ts is None else float(now_ts)
+        last = float(self.state.get("last_woken_ts", 0.0) or 0.0)
+        if now_ts - last < 30 * 60:
+            return False
+        self.state["last_woken_ts"] = now_ts
+        self._apply_event("woken")
+        self._note_event("woken", EVENT_EFFECTS.get("woken", {}), 1.0)
+        return True
 
     def _note_event(self, name: str, eff: dict, mult: float) -> None:
         """记一笔"刚才因为什么变了"，给面板的「最近的变化」用。"""
@@ -2633,6 +2877,7 @@ class EmotionCore(Star):
             for r in (st.get("blame_log") or [])
             if isinstance(r, dict)
         ]
+        sleep = self._sleep_info()
         return {
             "version": st.get("version"),
             "plugin_version": VERSION,
@@ -2645,6 +2890,14 @@ class EmotionCore(Star):
             "blame_fade_per_6h": BLAME_FADE_PER_6H,
             "next_fade_ts": next_fade,
             "blame_log": blame_log,
+            "sleep": {
+                "enabled": bool(sleep.get("enabled")),
+                "asleep": bool(sleep.get("asleep")),
+                "bedtime": str(sleep.get("bedtime") or ""),
+                "wake": str(sleep.get("wake") or ""),
+                "stay_up": bool(sleep.get("stay_up")),
+                "wake_ts": float(sleep.get("wake_ts") or 0.0),
+            },
             "mood_cn": mood_label(st.get("drives") or {}),
             "hint": self._hint_brief(mode, st.get("drives") or {}),
             "blame": float(st.get("blame_pressure", 0.0) or 0.0),
@@ -2686,14 +2939,17 @@ class EmotionCore(Star):
                 "cooldown_hours": float(self._cfg("proactive.cooldown_hours", 6.0)),
                 "daily_limit": int(self._cfg("proactive.daily_limit", 4)),
                 "min_idle_minutes": float(self._cfg("proactive.min_idle_minutes", 10)),
-                "quiet_hours": str(self._cfg("proactive.quiet_hours", "")),
-                "quiet_active": in_quiet_hours(
-                    datetime.now(), str(self._cfg("proactive.quiet_hours", "") or "")
-                ),
                 "target_umo": str(self._cfg("proactive.target_umo", "")),
                 "segment_reply": bool(self._cfg("proactive.segment_reply", True)),
                 "company": bool(self._cfg("proactive.company", True)),
                 "deep": bool(self._cfg("proactive.deep", True)),
+                "group_everyone": bool(
+                    self._cfg("perception.group_everyone", False)
+                ),
+                "group_scale": float(self._cfg("perception.group_scale", 0.5)),
+                "group_negative_scale": float(
+                    self._cfg("perception.group_negative_scale", 0.8)
+                ),
                 "thought_min_weight": float(self._cfg("thought.min_weight", 0.2)),
                 "thought_push": float(self._cfg("thought.proactive_push", 0.15)),
                 "shut_enabled": bool(self._cfg("shut.enabled", True)),
