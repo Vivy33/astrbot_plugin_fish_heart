@@ -71,6 +71,24 @@ def _pending_hint(thoughts: list) -> str:
         return ""
 
 
+def _pending_induce(thoughts: list) -> str:
+    if not engine:
+        return ""
+    try:
+        return engine.pending_induce(thoughts)
+    except Exception:
+        return ""
+
+
+def _mark_induced(thoughts: list) -> None:
+    if not engine:
+        return
+    try:
+        engine.mark_induced(thoughts)
+    except Exception:
+        pass
+
+
 def _speak_bias(thoughts: list) -> float:
     if not engine:
         return 0.0
@@ -90,7 +108,7 @@ def _thought_summary(thoughts: list) -> list:
 
 
 PLUGIN_NAME = "astrbot_plugin_fish_heart"
-VERSION = "0.3.4"
+VERSION = "0.3.5"
 
 # 注入钩子优先级：AstrBot 按优先级 **降序** 执行。
 # 天使之心 = 40，TTS = 0，这里用 -10 表示最后一个执行（只追加、不覆盖）。
@@ -390,11 +408,21 @@ KW_BLAME_HARD_NEED_YOU = ("烦死了", "恶心")
 # 中责里天生就是冲她说的，不要求出现"你"
 KW_BLAME_MID_DIRECT = ("说了多少遍", "不听话")
 # 这些词在描述事情/自己时也常用，必须出现"你"才算
-KW_BLAME_MID_NEED_YOU = ("你又这样", "你又来", "怎么又", "每次都", "没用", "笨")
+KW_BLAME_MID_NEED_YOU = ("你又这样", "你又来", "怎么又", "每次都", "没用")
+# "笨"不能裸匹配：小笨鱼、笨笨、小笨蛋都是称呼。
+# 只有这些明确的骂人说法才算责怪（且仍要求句中有"你"）。
+KW_BEN_INSULT = ("真笨", "好笨", "太笨", "笨死", "笨得", "笨猪", "笨狗",
+                 "笨东西", "你笨", "笨啊", "笨呢", "是不是笨", "蠢")
 # 命中词落在这几个说法里就不算责怪（先抹掉再匹配，长度不变）
 KW_BLAME_EXEMPT = ("不讨厌你", "不烦你", "没烦你", "不怪你", "不是你的错",
                    "不是说你", "没说你", "不是骂你", "不是没用", "没用多久",
-                   "笨蛋", "笨笨", "笨手笨脚", "笨鸟")
+                   "笨蛋", "笨笨", "笨手笨脚", "笨鸟",
+                   "小笨蛋", "小笨鱼", "笨鱼", "笨笨鱼", "笨蛋鱼", "小笨蛋鱼",
+                   "小傻鱼", "傻鱼", "小傻子")
+# 这些是称呼/爱称。句子里出现它们时，"你怎么…"这种轻责多半是打趣，
+# 不记责怪（真要骂通常会带"滚/没用/烦死了"这类硬词，仍会被 hard/mid 抓住）。
+PET_NAMES = ("小笨蛋", "小笨鱼", "笨鱼", "笨笨鱼", "笨蛋鱼", "小笨蛋鱼",
+             "小傻鱼", "傻鱼", "小傻子", "笨笨", "笨蛋", "大肥鱼")
 # 轻责：不再收"不行""不对"这种通用词——"今天不行，改天吧""不对，我记错了"
 # 都不是在说她。要的是明确的指向。
 KW_BLAME_MILD = ("你怎么", "为什么总是", "别这样", "这样不行", "这样不对",
@@ -476,11 +504,21 @@ def _hits_blame_mid(text: str) -> bool:
     # "你又熬夜了""这个没用"都不是在骂她；要求这一句里有"你"
     if "你" not in probe:
         return False
-    return any(k in probe for k in KW_BLAME_MID_NEED_YOU)
+    if any(k in probe for k in KW_BLAME_MID_NEED_YOU):
+        return True
+    # 昵称句里的"笨"按打趣算："小笨鱼你真笨"不记，"小笨鱼你没用"照记
+    if any(k in (text or "") for k in PET_NAMES):
+        return False
+    # "笨"只认明确骂法："你真笨""笨死了"算，"小笨鱼你在干嘛"不算
+    return any(k in probe for k in KW_BEN_INSULT)
 
 
 def _hits_blame_mild(text: str) -> bool:
     """轻责——"你怎么看""你怎么想"是提问，不是责怪。"""
+    # 带昵称的"你怎么这么笨/这么可爱"是打趣，不是责怪；
+    # 真骂人会带硬词，仍会被 hard/mid 抓住。
+    if any(k in (text or "") for k in PET_NAMES):
+        return False
     for k in KW_BLAME_MILD:
         if k not in text:
             continue
@@ -688,6 +726,12 @@ def new_state() -> dict:
         "sleep_day": "",
         "sleep_stay_up": False,
         "last_woken_ts": 0.0,
+        # 上一次念头被满足的时间：两条之间要等冷却
+        "last_settle_ts": 0.0,
+        # 主动开口三次没被接住、最后放下的那条
+        "last_let_go": {},
+        # 最近完成（多条，2 小时内都展示）
+        "recent_rewards": [],
         # 回避档的"已读不回"：连续不回了几条 + 没接住的那几句话
         "silent_streak": 0,
         "last_silent_ts": 0.0,
@@ -947,6 +991,16 @@ class EmotionCore(Star):
         self._unknown_sender_logged.add(umo)
         logger.info("[鱼的心] %s %s：%s", kind, umo, note)
 
+    def _is_bound_owner(self, event: AstrMessageEvent, umo: str) -> bool:
+        """严格判断发送者是否在白名单里（群友模式做"鱼主"差分用）。
+
+        `_is_owner()` 在群友模式下对群里所有人都返回 True，不能用来区分
+        鱼主和群友；这里只认 `owner_ids`（含 target_umo 反推）里的 QQ。
+        """
+        ids = self._owner_ids()
+        sid = self._sender_id(event)
+        return bool(ids and sid and sid in ids)
+
     def _absorb_outsider_turn(
         self, request, umo: str = "", text: str = "", who: str = ""
     ) -> None:
@@ -1014,6 +1068,19 @@ class EmotionCore(Star):
                     # 废弃字段：EMO 标记那条链已移除，把旧状态里的孤儿键清掉
                     base.pop("last_emotion", None)
                     base["thoughts"] = _migrate_thoughts(base.get("thoughts") or [])
+                    # 旧状态只有单个 last_reward：升级后补成列表，历史那条不丢
+                    if not isinstance(base.get("recent_rewards"), list):
+                        base["recent_rewards"] = []
+                    if (
+                        not base["recent_rewards"]
+                        and isinstance(base.get("last_reward"), dict)
+                        and base["last_reward"].get("ts")
+                    ):
+                        seed = dict(base["last_reward"])
+                        seed.setdefault("src", "settle")
+                        base["recent_rewards"] = [seed]
+                    # 0.3.5 起列表是唯一来源；旧的单条字段迁完就删掉
+                    base.pop("last_reward", None)
                     # v2 → v3：原来只有一个 last_user_msg，按"绝大多数是私聊"回填
                     try:
                         if int(raw.get("version", 1) or 1) < 3:
@@ -1255,6 +1322,20 @@ class EmotionCore(Star):
         st["thoughts"] = live[-5:]
         self._dbg("新念头：%s（%s）", t["text"], kind)
 
+    def _note_reward(self, kind: str, mood: str, src: str = "settle") -> None:
+        """记一条"最近完成"：列表保留多条，2 小时内都能在面板看到。
+
+        src="self" 表示不是他喂饱的，而是「安静 / 想做事」自己缓过来。
+        """
+        st = self.state
+        entry = {"kind": str(kind or ""), "mood": str(mood or ""),
+                 "ts": time.time(), "src": str(src or "settle")}
+        rows = st.get("recent_rewards")
+        if not isinstance(rows, list):
+            rows = []
+        rows.append(entry)
+        st["recent_rewards"] = rows[-8:]
+
     def _expire_thoughts(self) -> None:
         """到期的念头：没被满足就凉掉并轻微回落；自己缓过来的算完成。"""
         if not engine:
@@ -1271,15 +1352,31 @@ class EmotionCore(Star):
                     st["drives"][k] = clamp(float(st["drives"][k]) + float(dv))
             self._dbg("念头凉了：%s", t.get("text"))
         keep = []
+        auto_done = False
+        # 自愈完成也守同一条冷却：否则刚完成一条后点一次 /心 tick，
+        # 安静/想做事又会立刻完成第二条。
+        cooldown = max(
+            0.0, float(self._cfg("thought.settle_cooldown_minutes", 10)) * 60.0
+        )
+        can_auto = not (
+            cooldown
+            and now - float(st.get("last_settle_ts", 0.0) or 0.0) < cooldown
+        )
         for t in thoughts:
             if float(t.get("expires", 0)) <= now:
                 continue
-            if t.get("pending", True):
+            if t.get("pending", True) and not auto_done and can_auto:
                 mood = engine.auto_complete(t, st["drives"])
                 if mood:
                     t["pending"] = False
                     t["mood"] = mood
                     t["expires"] = now + 2 * 3600
+                    # 自动完成（安静/想做事）也要进「最近完成」，
+                    # 否则它只是从列表消失、面板上什么都没留下
+                    self._note_reward(t.get("kind"), mood, src="self")
+                    # 一次心跳也只完成一条，并让它进入同一条完成冷却
+                    st["last_settle_ts"] = now
+                    auto_done = True
             if float(t.get("expires", 0)) > now:
                 keep.append(t)
         st["thoughts"] = keep
@@ -1287,18 +1384,31 @@ class EmotionCore(Star):
     def _settle_thoughts(
         self, events: list[str], text: str, weight: float = 1.0, is_group: bool = False
     ) -> None:
-        """用户这一句 / 这一轮事件，把哪个念头喂饱了。"""
+        """用户这一句 / 这一轮事件，把哪个念头喂饱了。
+
+        一轮最多一条；两条之间还要等 `thought.settle_cooldown_minutes`——
+        否则连发几句就能把列表一口气清空。
+        """
         if not engine:
             return
         st = self.state
+        now = time.time()
+        cooldown = max(
+            0.0, float(self._cfg("thought.settle_cooldown_minutes", 10)) * 60.0
+        )
+        if cooldown and now - float(st.get("last_settle_ts", 0.0) or 0.0) < cooldown:
+            self._dbg("念头冷却中，先不结算")
+            return
         payload = engine.settle(
             st.get("thoughts") or [],
             events,
             text,
             str(st.get("mode", MODE_CALM)),
+            now=now,
         )
         if not payload:
             return
+        st["last_settle_ts"] = now
         # apply_reward 是纯加法，先拍快照再按权重回插：
         # 不用改 thought_engine，也能让"群里说句话"只满足一部分
         before_drives = {k: float(v) for k, v in (st.get("drives") or {}).items()}
@@ -1317,8 +1427,11 @@ class EmotionCore(Star):
         self._dbg("念头被满足：%s → %s", payload.get("kind"), payload.get("mood"))
 
     def _note_thought_attempt(self) -> None:
-        if engine:
-            engine.note_attempt(self.state.get("thoughts") or [])
+        if not engine:
+            return
+        gave_up = engine.note_attempt(self.state.get("thoughts") or [])
+        if gave_up:
+            self.state["last_let_go"] = gave_up
 
     def _heat_factor(self, name: str) -> float:
         """同类事件在 HEAT_WINDOW 内第 n 次发生时的增益系数（1 → 0）。
@@ -1365,7 +1478,8 @@ class EmotionCore(Star):
         return take
 
     def _apply_event(
-        self, name: str, weight: float = 1.0, is_group: bool = False
+        self, name: str, weight: float = 1.0, is_group: bool = False,
+        is_owner: bool = False,
     ) -> None:
         eff = EVENT_EFFECTS.get(name)
         if not eff:
@@ -1374,20 +1488,31 @@ class EmotionCore(Star):
         drives = st["drives"]
 
         # 好事按渠道权重缩水；坏事在群里按自己的系数走。
-        # 群友模式：正向再乘 group_scale（默认 0.5）压难度，
-        # 负向单独用 group_negative_scale（默认 0.8）——比私聊轻，但不能按 0.5 再折，
-        # 否则几十个人的群凶她一句，比私聊还轻，反而"越骂越没事"。
+        # 群友模式：正向默认乘 group_scale（0.5）压难度，负向单独用
+        # group_negative_scale（0.8）；但**鱼主**（owner_ids 命中的人）不吃这个折扣，
+        # 正向按 group_owner_scale（默认 1.0 = 不打折），负向按 1.2。
         mult = weight
         if is_group and bool(self._cfg("perception.group_everyone", False)):
             if name in NEGATIVE_EVENTS:
-                mult = clamp(
-                    float(self._cfg("perception.group_negative_scale", 0.8)),
-                    0.05, 1.5,
-                )
+                if is_owner:
+                    mult = float(self._cfg("channel.negative_multiplier", 1.2))
+                else:
+                    mult = clamp(
+                        float(self._cfg("perception.group_negative_scale", 0.8)),
+                        0.05, 1.5,
+                    )
             else:
-                mult *= clamp(
-                    float(self._cfg("perception.group_scale", 0.5)), 0.05, 1.0
-                )
+                if is_owner:
+                    # 鱼主不吃群聊渠道权重：1.0 就等于私聊强度
+                    mult = clamp(
+                        float(self._cfg("perception.group_owner_scale", 1.0)),
+                        0.05, 2.0,
+                    )
+                else:
+                    mult *= clamp(
+                        float(self._cfg("perception.group_scale", 0.5)),
+                        0.05, 1.0,
+                    )
         elif is_group and name in NEGATIVE_EVENTS:
             mult = float(self._cfg("channel.negative_multiplier", 1.2))
 
@@ -1607,16 +1732,25 @@ class EmotionCore(Star):
                     self.state["penalized_24h"] = False
 
             # 这句话能影响她多少：私聊满分，群里按"多久没私聊"打折
+            # 群友模式下区分"鱼主"和普通群友：鱼主不吃群友折扣，
+            # 连渠道权重也按私聊 1.0 算（哄她、念头奖励才不会又被砍一刀）
+            owner_sender = self._is_bound_owner(event, umo)
             weight = self._channel_weight(is_group)
+            if (
+                is_group
+                and owner_sender
+                and bool(self._cfg("perception.group_everyone", False))
+            ):
+                weight = 1.0
 
             for ev in events:
-                self._apply_event(ev, weight, is_group)
+                self._apply_event(ev, weight, is_group, owner_sender)
                 if ev == "comfort":
                     pass  # comfort 由 _consume_comfort 统一结算
                 if ev in ("blame_mild", "blame_mid", "blame_hard", "fake_comfort"):
                     self.state["comfort_streak"] = 0
                     self.state["blame_noticed_ts"] = time.time()
-                    self._note_blame(ev, text, weight, is_group)
+                    self._note_blame(ev, text, weight, is_group, owner_sender)
 
             self._consume_comfort(weight)
             self._settle_thoughts(events, text, weight, is_group)
@@ -1694,7 +1828,8 @@ class EmotionCore(Star):
     # ---------------- 注入文本 ----------------
 
     def _build_injection(
-        self, force: bool = False, for_owner: bool = True, umo: str = ""
+        self, force: bool = False, for_owner: bool = True, umo: str = "",
+        with_induce: bool = False,
     ) -> str:
         if not self._cfg("inject.enabled", True):
             return ""
@@ -1770,13 +1905,27 @@ class EmotionCore(Star):
         ):
             lines.append("心里矛盾：还在生他的气，可你又不想他真的走。")
         if for_owner:
-            thought = _pending_hint(st.get("thoughts") or [])
+            thoughts = st.get("thoughts") or []
+            thought = _pending_hint(thoughts)
             if thought:
                 lines.append(f"心里惦记着：{thought}")
+                # 台阶只在"她主动开口"时给：正常聊天里她只需要惦记着，
+                # 不该每轮都被布置一个"怎么递话"的任务。
+                if with_induce:
+                    induce = _pending_induce(thoughts)
+                    if induce:
+                        lines.append(f"如果想让他接住，可以往这个方向递话：{induce}。")
+                        lines.append(
+                            "台阶不是台词：上面只是方向，用你自己的话，别照抄；"
+                            "今天没有对应的事就别编，不想提也可以不提。"
+                            "他没接住就算了，别追问。"
+                        )
+                        _mark_induced(thoughts)
         return "\n".join(lines)
 
     def _note_blame(
-        self, ev: str, text: str, weight: float = 1.0, is_group: bool = False
+        self, ev: str, text: str, weight: float = 1.0, is_group: bool = False,
+        is_owner: bool = False,
     ) -> None:
         """记下"她因为哪句话难受"（最近 5 条），给注入和面板当出处。"""
         body = (text or "").strip()
@@ -1788,9 +1937,13 @@ class EmotionCore(Star):
             else float(weight)
         )
         if is_group and bool(self._cfg("perception.group_everyone", False)):
-            mult = clamp(
-                float(self._cfg("perception.group_negative_scale", 0.8)),
-                0.05, 1.5,
+            mult = (
+                float(self._cfg("channel.negative_multiplier", 1.2))
+                if is_owner
+                else clamp(
+                    float(self._cfg("perception.group_negative_scale", 0.8)),
+                    0.05, 1.5,
+                )
             )
         delta = float(EVENT_EFFECTS.get(ev, {}).get("blame", 0.0)) * mult
         rows = [
@@ -2381,7 +2534,7 @@ class EmotionCore(Star):
         """先用 LLM 生成一句话，失败则用兜底台词。"""
         persona_sp = await self._persona_system_prompt(umo)
         blocks = [persona_sp] if persona_sp else []
-        inj = self._build_injection(force=True)
+        inj = self._build_injection(force=True, with_induce=True)
         if inj:
             blocks.append(inj)
 
@@ -2413,11 +2566,19 @@ class EmotionCore(Star):
 
         thought = _pending_hint(st.get("thoughts") or [])
         if thought:
-            blocks.append(
-                f"你现在心里惦记着：{thought}。"
-                "这是你此刻的念头，不是他做过的事，别把它说成回忆；"
-                "说的时候自然带一点，但别直接复述这句话。"
-            )
+            # 心境块里已经有"心里惦记着：…"时不再重复一遍（重复会把这条念头
+            # 的权重压得过重、说话更像在完成任务）；只补"这不是回忆"的边界。
+            if inj:
+                blocks.append(
+                    "这条念头只是你此刻的心情，不是他做过的事，别把它说成回忆；"
+                    "说的时候自然带一点，但别直接复述。"
+                )
+            else:
+                blocks.append(
+                    f"你现在心里惦记着：{thought}。"
+                    "这是你此刻的念头，不是他做过的事，别把它说成回忆；"
+                    "说的时候自然带一点，但别直接复述这句话。"
+                )
 
         # 优先用 AstrBot 的真实对话历史（双方都在），拿不到再退回自己的 recent
         transcript = await self._real_transcript(umo, limit=24)
@@ -2829,15 +2990,39 @@ class EmotionCore(Star):
         drives = st.get("drives") or {}
         now_ts = time.time()
 
+        def _fresh(raw, ttl: float = 2 * 3600) -> dict:
+            """最近完成/放下只保留 2 小时（和念头完成后的展示期一致）。"""
+            d = dict(raw or {})
+            ts = float(d.get("ts", 0) or 0)
+            return d if ts and now_ts - ts <= ttl else {}
+
+        def _fresh_list(raw, ttl: float = 2 * 3600, limit: int = 5) -> list:
+            rows = [dict(r) for r in (raw or []) if isinstance(r, dict)]
+            rows = [
+                r for r in rows
+                if float(r.get("ts", 0) or 0)
+                and now_ts - float(r["ts"]) <= ttl
+                and str(r.get("mood") or "")
+            ]
+            rows.sort(key=lambda r: float(r.get("ts", 0) or 0), reverse=True)
+            return rows[:limit]
+
         thoughts = []
         for t in st.get("thoughts") or []:
+            # 面板只列"还没被满足"的念头；已完成的收进 recent_rewards，
+            # 不再挂在列表里占一个位置（完成的内部仍保留 2 小时，用来挡同 kind 再生）
+            if not t.get("pending", True):
+                continue
             kind = str(t.get("kind") or "")
             label = ""
+            how = ""
             if engine is not None:
                 try:
                     label = (engine.KIND_META.get(kind) or {}).get("label") or ""
+                    how = (getattr(engine, "THOUGHT_HOW", {}) or {}).get(kind, "")
                 except Exception:
                     label = ""
+                    how = ""
             expires = float(t.get("expires", 0) or 0)
             created = float(t.get("created", 0) or 0)
             thoughts.append(
@@ -2845,6 +3030,7 @@ class EmotionCore(Star):
                     "kind": kind,
                     "kind_cn": label or kind,
                     "text": str(t.get("text") or ""),
+                    "how": how,
                     "pending": bool(t.get("pending", True)),
                     "mood": str(t.get("mood") or ""),
                     "expires": expires,
@@ -2898,6 +3084,8 @@ class EmotionCore(Star):
                 "stay_up": bool(sleep.get("stay_up")),
                 "wake_ts": float(sleep.get("wake_ts") or 0.0),
             },
+            "recent_rewards": _fresh_list(st.get("recent_rewards")),
+            "last_let_go": _fresh(st.get("last_let_go")),
             "mood_cn": mood_label(st.get("drives") or {}),
             "hint": self._hint_brief(mode, st.get("drives") or {}),
             "blame": float(st.get("blame_pressure", 0.0) or 0.0),
@@ -2928,6 +3116,11 @@ class EmotionCore(Star):
             },
             "enabled": bool(self._cfg("enabled", True)),
             "thought_enabled": bool(self._cfg("thought.enabled", True)),
+            "settle_cooldown_left": max(
+                0.0,
+                float(self._cfg("thought.settle_cooldown_minutes", 10)) * 60.0
+                - (now_ts - float(st.get("last_settle_ts", 0.0) or 0.0)),
+            ),
             "inject_state": {
                 str(k): {
                     "ts": float((v or {}).get("ts", 0) or 0),
@@ -2947,11 +3140,17 @@ class EmotionCore(Star):
                     self._cfg("perception.group_everyone", False)
                 ),
                 "group_scale": float(self._cfg("perception.group_scale", 0.5)),
+                "group_owner_scale": float(
+                    self._cfg("perception.group_owner_scale", 1.0)
+                ),
                 "group_negative_scale": float(
                     self._cfg("perception.group_negative_scale", 0.8)
                 ),
                 "thought_min_weight": float(self._cfg("thought.min_weight", 0.2)),
                 "thought_push": float(self._cfg("thought.proactive_push", 0.15)),
+                "settle_cooldown_minutes": float(
+                    self._cfg("thought.settle_cooldown_minutes", 10)
+                ),
                 "shut_enabled": bool(self._cfg("shut.enabled", True)),
                 "silent_cap": SHUT_HISTORY_CAP,
                 "daily_cap": {k: float(v) for k, v in DAILY_GAIN_CAP.items()},

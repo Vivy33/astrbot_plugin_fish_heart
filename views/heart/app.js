@@ -39,7 +39,7 @@
   const KIND_CN = {
     praise: "想被夸", miss: "想你", hug: "想抱抱", talk: "想找你说话",
     ask_day: "问你今天", task: "想找点事做", quiet: "想安静会儿",
-    dwell: "想撒个娇",
+    dwell: "等你回话", company: "想让你陪", deep: "走心",
   };
 
   /** 展示层统一把"他"换成"你"（避开"其他"这类词），引擎里的原文不动 */
@@ -230,22 +230,76 @@
     });
   }
 
-  function renderThoughts(list) {
+  /** 念头卡片顶部的"最近完成 / 最近放下"小条 */
+  function renderLastEvent(id, data, label, tagText) {
+    const el = $(id);
+    if (!el) return;  // 旧页面缓存里可能还没有这一行
+    const d = data || {};
+    if (!d.mood) {
+      el.hidden = true;
+      el.textContent = "";
+      return;
+    }
+    el.hidden = false;
+    const kind = d.kind ? (KIND_CN[d.kind] || d.kind) : "";
+    el.textContent = `${label}：${kind ? kind + " · " : ""}${toYou(d.mood)}（${fmtAgo(d.ts)}）`;
+    const tag = document.createElement("span");
+    tag.className = "tag";
+    tag.textContent = tagText;
+    el.appendChild(tag);
+  }
+
+  /** 最近完成：2 小时内可能有多条，逐条列出 */
+  function renderRewards(list) {
+    const box = $("lastRewardList");
+    if (!box) return;
+    box.replaceChildren();
+    (list || []).forEach((r) => {
+      if (!r || !r.mood) return;
+      const kind = r.kind ? (KIND_CN[r.kind] || r.kind) : "";
+      const self = r.src === "self";
+      const p = document.createElement("p");
+      p.className = self ? "last-reward self" : "last-reward";
+      p.textContent = `${self ? "自己缓过来" : "最近完成"}：${kind ? kind + " · " : ""}${toYou(r.mood)}（${fmtAgo(r.ts)}）`;
+      const tag = document.createElement("span");
+      tag.className = "tag";
+      tag.textContent = self ? "自愈" : "回味中";
+      p.appendChild(tag);
+      box.appendChild(p);
+    });
+  }
+
+  function renderThoughts(list, recentRewards, cooldownLeft, lastLetGo) {
     const ul = $("thoughtList");
     ul.replaceChildren();
-    $("thoughtCount").textContent = `${list.length} 条`;
+    const cd = Number(cooldownLeft) || 0;
+    $("thoughtCount").textContent =
+      `${list.length} 条` + (cd > 0 ? ` · 下次可完成 ${fmtSpan(cd)}` : "");
     $("thoughtEmpty").hidden = list.length > 0;
+
+    renderRewards(recentRewards);
+    renderLastEvent("lastLetGo", lastLetGo, "最近放下", "放下");
+    const lastCard = $("lastCard");
+    if (lastCard) {
+      const hasLast = !!((recentRewards && recentRewards.length)
+        || (lastLetGo && lastLetGo.mood));
+      lastCard.hidden = !hasLast;
+    }
 
     const now = Date.now() / 1000;
     list.forEach((t) => {
       const li = document.createElement("li");
       li.className = "thought";
+      if (!t.pending) li.classList.add("done");
 
       const life = Math.max(1, Number(t.ttl_total) || 1);
       const remain = Math.max(0, Number(t.expires) - now);
       const pct = Math.min(100, (remain / life) * 100);
       const kindCn = toYou(t.kind_cn || KIND_CN[t.kind] || t.kind);
-      const moodText = t.pending ? "还没被满足" : toYou(t.mood || "已经放下");
+      const how = toYou(t.how || "");
+      const moodText = t.pending
+        ? (how ? `还没被满足 · ${how}` : "还没被满足")
+        : toYou(t.mood || "已经放下");
 
       li.innerHTML = `
         <div class="thought-top">
@@ -287,7 +341,7 @@
         : "关"],
       ["分段发送", cfg.segment_reply ? "开" : "关"],
       ["群聊全员", cfg.group_everyone
-        ? `开 正×${cfg.group_scale ?? 0.5} 负×${cfg.group_negative_scale ?? 0.8}`
+        ? `开 主×${cfg.group_owner_scale ?? 1} 群×${cfg.group_scale ?? 0.5} 负×${cfg.group_negative_scale ?? 0.8}`
         : "关"],
       ["念头", d.thought_enabled ? "开" : "关"],
       ["入池门槛", `${cfg.thought_min_weight ?? 0.2}`],
@@ -490,7 +544,10 @@
     guard("雷达", () => drawRadar(drives));
     guard("图例", () => renderRadarLegend(d));
     guard("此刻", () => renderVitals(d));
-    guard("念头", () => renderThoughts(d.thoughts || []));
+    guard("念头", () => {
+      renderThoughts(d.thoughts || [], d.recent_rewards || [],
+        d.settle_cooldown_left, d.last_let_go);
+    });
     guard("主动说话", () => renderProactive(d));
     // recent 全是单边（历史遗留）时，改用 AstrBot 的真实对话历史
     const recent = d.recent || [];

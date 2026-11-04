@@ -461,7 +461,7 @@ body::before {
 .tendency b { flex: 0 0 auto; color: var(--text); font-weight: 600; }
 
 /* ---------- 念头 ---------- */
-.thought-list { position: relative; z-index: 1; flex: 0 1 auto; max-height: 150px; min-height: 0; overflow-y: auto; align-content: start; list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; scrollbar-width: thin; }
+.thought-list { position: relative; z-index: 1; flex: 1 1 0; max-height: none; min-height: 80px; overflow-y: auto; align-content: start; list-style: none; margin: 0; padding: 0 4px 0 0; display: grid; gap: 10px; scrollbar-width: thin; }
 
 /* 「最近的变化」：念头卡的下半区 */
 .sub-head { margin-top: 12px; }
@@ -469,8 +469,8 @@ body::before {
 .event-list {
   position: relative;
   z-index: 1;
-  flex: 1;
-  min-height: 0;
+  flex: 1 1 0;
+  min-height: 60px;
   overflow-y: auto;
   align-content: start;
   list-style: none;
@@ -502,6 +502,8 @@ body::before {
   display: grid;
   gap: 8px;
 }
+/* 已完成的念头还留在列表里展示"心情"，压暗一点，和待满足的区分开 */
+.thought.done { opacity: 0.62; }
 .thought-top { display: flex; align-items: center; gap: 8px; }
 .thought-kind {
   font-size: 10.5px;
@@ -647,6 +649,76 @@ body::before {
   margin: 6px 0 0;
   font-size: 12.5px;
   color: var(--dim);
+}
+
+/* 最近完成：比普通提示醒目一点，带"回味中"标签 */
+.last-rewards {
+  display: grid;
+  gap: 8px;
+}
+.last-rewards:empty { display: none; }
+/* 列表内的每一条间距统一交给 grid gap；let-go 是列表外的兄弟节点，
+   用同尺寸的 margin-top 补上，保证"每条上下空行一样大" */
+.last-rewards .last-reward { margin: 0; }
+.last-reward.let-go { margin-top: 8px; }
+.last-rewards:empty + .last-reward.let-go { margin-top: 0; }
+.last-reward {
+  position: relative;
+  z-index: 1;
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--line-strong, var(--line));
+  background: var(--panel);
+  background: color-mix(in srgb, var(--mode) 10%, var(--panel));
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.5;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.last-reward .tag {
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--line-strong, var(--line));
+  background: var(--panel);
+  color: var(--mode);
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+/* 最近放下：不是完成，用虚线 + 灰字，和"回味中"区分 */
+.last-reward.let-go {
+  border-style: dashed;
+  background: var(--panel);
+  color: var(--muted);
+}
+.last-reward.let-go .tag {
+  color: var(--dim);
+  border-color: var(--line);
+}
+/* 自愈完成：不是他喂的，用点线边框区分 */
+.last-reward.self { border-style: dotted; }
+.last-reward.self .tag { color: var(--muted); }
+
+/* 顶部"最近完成/自愈/放下"整行卡片：整体封顶 260px，内容多时只滚列表 */
+.card.card-last {
+  grid-column: 1 / -1;
+  height: auto;
+  min-height: 0;
+  max-height: 260px;
+  overflow: hidden;
+  padding: 16px 22px;
+}
+.card-last .card-head { margin-bottom: 8px; }
+.card-last .last-rewards .last-reward { margin-top: 0; }
+.last-scroll {
+  max-height: 200px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  padding-right: 4px;
 }
 
 /* ---------- 错误卡 ---------- */

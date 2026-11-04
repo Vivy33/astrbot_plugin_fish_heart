@@ -207,6 +207,36 @@ KEYWORD_KINDS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("quiet", ("歇", "休息", "睡", "安静", "别忙了")),
 )
 
+# 面板上的"怎么才会完成"——只做展示，不参与判定。
+# 用户反馈"每个念头都没完成"，很多时候是不知道什么话才算数。
+THOUGHT_HOW: dict[str, str] = {
+    "praise": "夸她一句（厉害/真棒/可爱…）",
+    "miss": "说想她（想你/想我/惦记）",
+    "hug": "哄她或抱抱（抱/贴贴/亲亲/撒娇）",
+    "talk": "回她一句就行",
+    "ask_day": "回她一句就行",
+    "task": "找她帮个忙（帮我/安排…）",
+    "quiet": "安静一会儿，疲劳/压力降下来会自动完成",
+    "dwell": "及时回她",
+    "company": "回她一句，或说陪陪她",
+    "deep": "回她一句就行",
+}
+
+# 给模型的"怎么给台阶"：只写进注入/主动 prompt，不显示在面板。
+# 目标是让她主动递一个能让用户接住的机会，而不是直接索取。
+THOUGHT_INDUCE: dict[str, str] = {
+    "praise": "想被夸，但别直接要。可以卖个乖、自嘲一句，或者把刚做的一件小事说出来，等他接话；用你自己的话，别照抄固定句子",
+    "miss": "想他就轻轻提一句，或者问他今天有没有空理你；别质问、别连问，给他接话的机会",
+    "hug": "想被抱就撒个娇、说今天有点累想靠一下；用你平时的语气，别像念台词",
+    "talk": "有想讲的就说，没有就别硬找话题；想说的时候先起个头，等他问再说",
+    "ask_day": "想关心他就直接问，别绕；他答了就顺着聊，别查岗",
+    "task": "想帮忙就问他有没有要搭把手的，别硬找活；没有就别说",
+    "quiet": "累了就说想安静一会儿，不用解释；不想说也可以少说两句",
+    "dwell": "想催就轻轻问一句在忙吗，别连问；他没回就先做自己的事",
+    "company": "想让他陪就直说想聊会儿，或者问他现在方不方便；别绕弯子",
+    "deep": "想问就问，但先确认他方便；他不想答就换话题",
+}
+
 
 def match_kind(text: str) -> str | None:
     """从用户一句话里反推她想被喂饱的念头。"""
@@ -233,6 +263,8 @@ def new_thought(kind: str, now: float | None = None, weight: float = 0.0) -> dic
         "pending": True,
         "attempts": 0,
         "mood": "",
+        # 这条念头是否已经给过"台阶"提示：每条只提示一次，避免同一句话反复出现
+        "induced": False,
     }
 
 
@@ -350,15 +382,25 @@ def apply_reward(state: dict, payload: dict) -> None:
             )
         elif key in DRIVES:
             drives[key] = max(0.0, min(100.0, float(drives.get(key, 50.0)) + float(dv)))
-    state["last_reward"] = {
+    entry = {
         "kind": payload.get("kind"),
         "mood": payload.get("mood"),
         "ts": time.time(),
+        "src": "settle",
     }
+    # 最近完成改成列表：2 小时内的多次完成都要能显示，不能互相覆盖
+    rows = state.get("recent_rewards")
+    if not isinstance(rows, list):
+        rows = []
+    rows.append(entry)
+    state["recent_rewards"] = rows[-8:]
 
 
-def note_attempt(thoughts: list[dict], now: float | None = None) -> bool:
-    """主动开口时记一次尝试；连续开口没被接住就放弃这条念头。"""
+def note_attempt(thoughts: list[dict], now: float | None = None) -> dict | None:
+    """主动开口时记一次尝试；连续三次没被接住就放弃这条念头。
+
+    放弃时返回 {kind, mood, ts}，给面板的「最近放下」用；普通尝试返回 None。
+    """
     now = time.time() if now is None else now
     for t in thoughts or []:
         if not t.get("pending", True):
@@ -371,8 +413,13 @@ def note_attempt(thoughts: list[dict], now: float | None = None) -> bool:
             t["pending"] = False
             t["mood"] = "算了，先不想了"
             t["expires"] = now + 1800
-        return True
-    return False
+            return {
+                "kind": str(t.get("kind") or ""),
+                "mood": "算了，先不想了",
+                "ts": now,
+            }
+        return None
+    return None
 
 
 def take_expired(
@@ -463,6 +510,37 @@ def pending_hint(thoughts: list[dict], now: float | None = None) -> str:
     return str(meta.get("hint") or "")
 
 
+def pending_induce(thoughts: list[dict], now: float | None = None) -> str:
+    """和 pending_hint 选同一条念头，返回"怎么给他一个台阶"的一句话。
+
+    每条念头只提示一次（`induced`），避免同一条话术在注入里反复出现。
+    """
+    now = time.time() if now is None else now
+    live = [
+        t
+        for t in thoughts or []
+        if t.get("pending", True) and float(t.get("expires", 0)) > now
+    ]
+    if not live:
+        return ""
+    best = max(live, key=lambda t: float(t.get("weight", 0)))
+    if best.get("induced"):
+        return ""
+    return THOUGHT_INDUCE.get(str(best.get("kind")), "")
+
+
+def mark_induced(thoughts: list[dict], now: float | None = None) -> None:
+    """把"已经被提示过台阶"记到同一条念头上。"""
+    now = time.time() if now is None else now
+    live = [
+        t
+        for t in thoughts or []
+        if t.get("pending", True) and float(t.get("expires", 0)) > now
+    ]
+    if live:
+        max(live, key=lambda t: float(t.get("weight", 0)))["induced"] = True
+
+
 def pending_text(thoughts: list[dict], now: float | None = None) -> str:
     now = time.time() if now is None else now
     live = [
@@ -529,6 +607,9 @@ def migrate(raw: list[Any]) -> list[dict]:
             t["pending"] = bool(item.get("pending", True))
             t["mood"] = str(item.get("mood") or "")
             t["attempts"] = int(item.get("attempts", 0) or 0)
+            # 台阶"只提示一次"必须跨重载保留，否则每次 reload 都会再提示一遍
+            t["induced"] = bool(item.get("induced", False))
+            t["induced"] = bool(item.get("induced", False))
         else:
             # 真正的 v1：只有 text/webhint，没有生命周期
             t["pending"] = True
