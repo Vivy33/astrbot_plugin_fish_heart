@@ -27,6 +27,7 @@
   const MODES = {
     calm: { cn: "平静", color: "#4fd1c5" },
     wronged: { cn: "委屈", color: "#f6ad55" },
+    angry: { cn: "生气", color: "#ff6b6b" },
     afraid: { cn: "害怕", color: "#a78bfa" },
     shut: { cn: "回避", color: "#f17a8a" },
   };
@@ -320,14 +321,29 @@
     const cfg = d.config || {};
     const cooldown = Number(cfg.cooldown_hours || 0) * 3600;
     const last = Number(d.last_proactive || 0);
-    const remain = last ? Math.max(0, last + cooldown - d.now) : 0;
+    const nowSec = Number(d.now) || Date.now() / 1000;
+    const remain = last ? Math.max(0, last + cooldown - nowSec) : 0;
+    const proactiveOn = !!d.enabled && cfg.proactive_enabled !== false;
+    const limit = Math.max(0, Number(cfg.daily_limit ?? 0) || 0);
+    const count = Number(d.proactive_count || 0);
 
-    $("pCount").textContent = `${d.proactive_count}/${cfg.daily_limit ?? "?"}`;
-    $("pCooldown").textContent = last ? (remain > 0 ? fmtSpan(remain) : "可开口") : "可开口";
+    $("pCount").textContent = `${count}/${cfg.daily_limit ?? "?"}`;
+    $("pCooldown").textContent = !proactiveOn
+      ? "已关闭"
+      : (d.sleep?.asleep
+        ? "睡眠中"
+        : (d.mode === "shut"
+          ? "回避中"
+          : (!limit
+            ? "无额度"
+            : (count >= limit
+              ? "今日已满"
+              : (last ? (remain > 0 ? fmtSpan(remain) : "可开口") : "可开口")))));
     $("pLast").textContent = fmtAgo(last);
     $("pWaiting").textContent = d.awaiting_reply ? "是" : "否";
 
-    $("proactiveHint").textContent = `${MODES[d.mode]?.cn || d.mode} · ${d.enabled ? "心跳中" : "已暂停"}`;
+    $("proactiveHint").textContent =
+      `${MODES[d.mode]?.cn || d.mode} · ${!d.enabled ? "已暂停" : (!proactiveOn ? "主动说话已关" : (!limit ? "无主动额度" : (count >= limit ? "今日已满" : "心跳中")))}`;
     $("moodBadge").textContent = d.mood_cn || "平常";
 
     const chips = [
@@ -341,7 +357,7 @@
         : "关"],
       ["分段发送", cfg.segment_reply ? "开" : "关"],
       ["群聊全员", cfg.group_everyone
-        ? `开 主×${cfg.group_owner_scale ?? 1} 群×${cfg.group_scale ?? 0.5} 负×${cfg.group_negative_scale ?? 0.8}`
+        ? `开 主×${cfg.group_owner_scale ?? 1} 群×${cfg.group_scale ?? 0.5} 负 群${cfg.group_negative_scale ?? 0.35}/主${cfg.group_owner_negative_scale ?? 0.5}`
         : "关"],
       ["念头", d.thought_enabled ? "开" : "关"],
       ["入池门槛", `${cfg.thought_min_weight ?? 0.2}`],
@@ -371,10 +387,26 @@
         : `她在回避：主动说话被冻结；私聊 ${d.silent_streak || 0}/${cap} 条（这一条回 ${pct}%）、群聊 ${d.silent_streak_group || 0}/${cap} 条不回。`;
     } else if (d.sleep?.asleep) {
       readiness = `她睡着了（${d.sleep.bedtime}-${d.sleep.wake}${d.sleep.stay_up ? "，今晚熬夜" : ""}），${d.sleep.wake} 之后才可能开口。`;
+    } else if (!proactiveOn) {
+      readiness = "主动说话已关闭；你说话她会回，但不会主动开口。";
+    } else if (d.mode === "angry") {
+      const who = topAngerTarget(d.anger_targets);
+      const base = `她在生气${who ? `（对 ${who.label}）` : ""}：还会回你`;
+      if (!limit) {
+        readiness = `${base}；每日主动次数是 0，她不会主动开口；语气会冷，先道歉/说清楚比只哄有用。`;
+      } else if (count >= limit) {
+        readiness = `${base}；今天的 ${limit} 次主动已经用完了，但回复时仍会冷；先道歉/说清楚比只哄有用。`;
+      } else if (remain > 0) {
+        readiness = `${base}；主动说话冷却中，还要等 ${fmtSpan(remain)}；语气会冷，先道歉/说清楚比只哄有用。`;
+      } else {
+        readiness = `${base}，也可能主动开口；语气会冷，先道歉/说清楚比只哄有用。`;
+      }
+    } else if (!limit) {
+      readiness = "每日主动次数是 0，她不会主动开口。";
+    } else if (count >= limit) {
+      readiness = `今天的 ${limit} 次已经用完了，明天再来。`;
     } else if (remain > 0) {
       readiness = `冷却中，还要等 ${fmtSpan(remain)}。`;
-    } else if (d.proactive_count >= Number(cfg.daily_limit ?? 99)) {
-      readiness = `今天的 ${cfg.daily_limit} 次已经用完了，明天再来。`;
     } else {
       readiness = "随时可能开口 —— 取决于她的心情，和那一次概率。";
     }
@@ -452,7 +484,13 @@
       });
   }
 
-  function applyMode(mode, knot) {
+  function topAngerTarget(list) {
+    return (Array.isArray(list) ? list : [])
+      .filter((t) => t && t.label)
+      .sort((a, b) => Number(b.blame || 0) - Number(a.blame || 0))[0] || null;
+  }
+
+  function applyMode(mode, knot, targets) {
     const m = MODES[mode] || MODES.calm;
     document.documentElement.style.setProperty("--mode", m.color);
     document.documentElement.style.setProperty("--mode-soft", hexToSoft(m.color));
@@ -460,11 +498,15 @@
     // 心结：责怪被夹在 40，档位会永远停在「委屈」。不标出来，
     // 用户只会看到一个找不到出处的委屈徽章。
     const stuck = !!knot && mode === "wronged";
-    badge.textContent = stuck ? `${m.cn}·旧账` : m.cn;
+    const who = mode === "angry" ? topAngerTarget(targets) : null;
+    const target = who ? `·对${String(who.label).slice(0, 8)}` : "";
+    badge.textContent = stuck ? `${m.cn}·旧账` : `${m.cn}${target}`;
     badge.dataset.mode = mode;
     badge.title = stuck
       ? "责怪已经停在 40（心结），不会再自己往下掉：哄/道歉，或 /心 calm 才能解"
-      : "";
+      : who
+        ? `她在生 ${who.label} 的气（责怪贡献 ${Math.round(who.blame || 0)}）；对其他人只是委屈/难受`
+        : "";
   }
 
   /** 责怪那一行：数值 + 心结说明 + 最近一次责怪的原句（她"说不出来由"时就靠它）。
@@ -472,7 +514,11 @@
   function blameInfo(d) {
     const blame = Number(d.blame || 0);
     if (!(blame > 0)) return "";
-    const parts = [`${Math.round(blame)}/100`];
+    const floor = Number(d.blame_floor || 0);
+    // 和 /心 status 用同一套拆法：40 是心结底，超出的才是新账。
+    const parts = [floor > 0 && blame >= floor + 0.5
+      ? `${Math.round(blame)}/100（心结 ${Math.round(floor)} + 另 ${Math.round(blame - floor)}）`
+      : `${Math.round(blame)}/100`];
     const fade = Number(d.blame_fade_per_6h || 8);
     if (d.mind_knot) {
       parts.push("心结：不哄不会掉（/心 calm 可解）");
@@ -483,9 +529,16 @@
     const log = Array.isArray(d.blame_log) ? d.blame_log : [];
     const last = log[log.length - 1];
     if (last && last.t) {
-      const where = last.g ? "群里" : "私聊";
-      const text = last.t.length > 24 ? `${last.t.slice(0, 24)}…` : last.t;
-      parts.push(`最近：${fmtClock(last.ts)} ${where}「${text}」`);
+      const text = String(last.t);
+      let where = "私聊";
+      if (last.g) {
+        // 0.3.6 起记了"谁说的"：鱼主 / 群友昵称；老状态没有 o/w，就只写群里。
+        if (last.o === false) where = last.w ? `群里·${last.w}` : "群里·群友";
+        else if (last.o === true) where = "群里·鱼主";
+        else where = "群里";
+      }
+      const shown = text.length > 24 ? `${text.slice(0, 24)}…` : text;
+      parts.push(`最近：${fmtClock(last.ts)} ${where}「${shown}」`);
     }
     return parts.join(" · ");
   }
@@ -523,7 +576,7 @@
   }
 
   function render(d) {
-    applyMode(d.mode, d.mind_knot);
+    applyMode(d.mode, d.mind_knot, d.anger_targets);
     document.body.dataset.mode = d.mode;
 
     const ver = d.plugin_version ? `v${d.plugin_version} · ` : "";
@@ -533,7 +586,8 @@
     $("tickHint").textContent = `心跳 ${fmtAgo(d.last_tick)}`;
 
     const hint = d.hint || "";
-    const blameText = blameInfo(d);
+    let blameText = "";
+    guard("责怪行", () => { blameText = blameInfo(d); });
     $("tendencyRow").hidden = !hint;
     $("tendencyText").textContent = hint;
     $("blameLine").hidden = !blameText;
@@ -550,13 +604,14 @@
     });
     guard("主动说话", () => renderProactive(d));
     // recent 全是单边（历史遗留）时，改用 AstrBot 的真实对话历史
-    const recent = d.recent || [];
+    const recent = Array.isArray(d.recent) ? d.recent : [];
+    const history = Array.isArray(d.history) ? d.history : [];
     const hasBot = recent.some((m) => m.r === "bot");
     guard("最近说过的话", () => {
-      if (hasBot || !(d.history && d.history.length)) {
+      if (hasBot || !history.length) {
         renderRecent(recent.slice(-12), false);
       } else {
-        renderRecent(d.history.slice(-12), true);
+        renderRecent(history.slice(-12), true);
       }
     });
     guard("最近的变化", () => renderEvents(d.recent_events || []));
@@ -587,6 +642,9 @@
           "等不到 AstrBot 的页面桥接脚本（/api/plugin/page/bridge-sdk.js）。\n" +
           "通常是 AstrBot 版本不支持插件页面，或这个页面被直接打开、没有经过面板。",
         );
+      }
+      if (data && data.ok === false) {
+        throw new Error(data.error || "读取状态失败");
       }
       const payload = data && data.data ? data.data : data;
       if (!payload || !payload.drives) throw new Error("返回数据里没有驱动数值");
@@ -623,8 +681,28 @@
       if (!VIEW) VIEW = await waitForBridge();
       if (!VIEW || typeof VIEW.apiPost !== "function") throw new Error("当前环境不支持调用");
       const res = await VIEW.apiPost(API_TICK, {});
+      if (res && res.ok === false) {
+        throw new Error(res.error || "心跳失败");
+      }
       const sent = !!(res && (res.just_sent || (res.data && res.data.just_sent)));
-      toast(sent ? "她刚开口了，去看看消息" : "这次没开口（概率未命中）");
+      const cfg = (res && res.data && res.data.config) || {};
+      const tickLimit = Number(cfg.daily_limit ?? 1);
+      const tickCount = Number((res && res.data && res.data.proactive_count) || 0);
+      if (res && res.data && res.data.enabled === false) {
+        toast("总开关已关闭，这次只跳了心跳");
+      } else if (cfg.proactive_enabled === false) {
+        toast("主动说话已关闭，这次只跳了心跳");
+      } else if (Number(cfg.daily_limit ?? 1) <= 0) {
+        toast("每日主动次数为 0，这次只跳了心跳");
+      } else if (tickLimit > 0 && tickCount >= tickLimit) {
+        toast("今天的主动次数已经用完了，这次只跳了心跳");
+      } else if (res && res.data && res.data.sleep?.asleep) {
+        toast("她睡着了，这次只跳了心跳");
+      } else if (res && res.data && res.data.mode === "shut") {
+        toast("她在回避，主动说话被冻结，这次只跳了心跳");
+      } else {
+        toast(sent ? "她刚开口了，去看看消息" : "这次没开口（概率未命中）");
+      }
       await load();
     } catch (e) {
       toast(`操作失败：${e.message || e}`);

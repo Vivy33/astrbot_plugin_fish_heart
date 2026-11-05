@@ -45,13 +45,19 @@
         "description": "群友模式下鱼主的影响强度",
         "type": "float",
         "default": 1.0,
-        "hint": "0.05–2.0，只在群友模式生效：命中 perception.owner_ids 的发送者（鱼主）正向按这个系数算，默认 1.0 = 私聊强度（不再乘群聊渠道权重）；负向对鱼主按 channel.negative_multiplier（默认 1.2），普通群友才用 group_negative_scale。owner_ids 为空时认不出鱼主，这条不生效（所有人都按群友算）。"
+        "hint": "0.05–2.0，只在群友模式生效：命中 perception.owner_ids 的发送者（鱼主）正向按这个系数算，默认 1.0 = 私聊强度（不再乘群聊渠道权重）；负向对鱼主按下面的 group_owner_negative_scale（默认 0.5）。owner_ids 为空时认不出鱼主，这条不生效（所有人都按群友算）。"
       },
       "group_negative_scale": {
-        "description": "群友模式的影响强度（负向）",
+        "description": "群友模式的影响强度（负向·群友）",
         "type": "float",
-        "default": 0.8,
-        "hint": "0.05–1.5，只在群友模式生效：群里被凶 / 被敷衍时用这个系数（默认 0.8，比私聊的 1.0 轻一点）。别直接套用正向的 0.5，否则群里骂她一句比私聊还轻。"
+        "default": 0.35,
+        "hint": "0.05–1.5，只在群友模式生效：群里其他成员被凶 / 被敷衍时用这个系数（默认 0.35）。群友模式是“养在群里”的，单个群友的硬话从 40 心结只到 54（仍是委屈），再一句就可能进生气；想进害怕要更重。鱼主单独用下面的 group_owner_negative_scale。"
+      },
+      "group_owner_negative_scale": {
+        "description": "群友模式的影响强度（负向·鱼主）",
+        "type": "float",
+        "default": 0.5,
+        "hint": "0.05–1.5，只在群友模式生效：命中 owner_ids 的鱼主被凶时的系数（默认 0.5，是私聊的一半）。单个硬话从 40 → 60（生气），但不会直接回避；连续三次才会。想恢复“当众被凶更重”就调大。"
       }
     }
   },
@@ -164,7 +170,7 @@
         "type": "float",
         "description": "负向事件在群里的倍率",
         "default": 1.2,
-        "hint": "被凶 / 被敷衍在群里不打折，反而加重。"
+        "hint": "非群友模式的群聊里，被凶 / 被敷衍的倍率（默认 1.2，当众被凶比私聊重）。群友模式不走这一项：普通群友用 group_negative_scale（默认 0.35），鱼主用 group_owner_negative_scale（默认 0.5）。"
       }
     }
   },
