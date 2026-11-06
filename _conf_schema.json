@@ -74,7 +74,7 @@
         "type": "string",
         "description": "发往哪个会话（UMO）",
         "default": "",
-        "hint": "留空 = 自动记住最近跟她说话的会话。在目标会话里发 /心 umo 可查。"
+        "hint": "留空 = 自动记住最近跟她说话的会话。必须是 platform:MessageType:session_id 三段（例如 aiocqhttp:FriendMessage:123456 或 aiocqhttp:GroupMessage:123456），在目标会话里发 /心 umo 可复制完整值；只填 QQ 号/群号会跳过发送并写日志。"
       },
       "cooldown_hours": {
         "type": "float",
@@ -245,10 +245,97 @@
       }
     }
   },
+  "desire": {
+    "type": "object",
+    "description": "🔥 隐藏的欲",
+    "hint": "面板只保留启用开关和成人向总开关；阈值、持续时间、同意有效期等高级项已隐藏，可在配置 JSON 里修改。",
+    "items": {
+      "enabled": {
+        "type": "bool",
+        "description": "启用隐藏的欲",
+        "default": true,
+        "hint": "只在依恋、亲密都满格并持续一段时间后才解锁；面板和 /心 status 不显示数值。高级阈值/时长在配置 JSON 里改。"
+      },
+      "bond_threshold": {
+        "type": "float",
+        "description": "解锁所需的依恋/亲密",
+        "default": 80.0,
+        "hint": "两条都达到这个值才算关系满格。默认 80，和面板满格线一致。",
+        "invisible": true
+      },
+      "unlock_hold_hours": {
+        "type": "float",
+        "description": "满格持续多久才解锁（小时）",
+        "default": 24.0,
+        "hint": "避免刚碰到门槛就闪一下。",
+        "invisible": true
+      },
+      "lock_below": {
+        "type": "float",
+        "description": "掉到多少锁回（低于）",
+        "default": 75.0,
+        "hint": "解锁后任意一条掉到这个值以下，欲快速回落并锁回隐藏层。",
+        "invisible": true
+      },
+      "adult_enabled": {
+        "type": "bool",
+        "description": "允许成人向身体层",
+        "default": false,
+        "hint": "总开关，默认关闭。打开后，私聊鱼主可以在当前场景直接明确同意；/adult on 只是把它预授权为 24 小时（可配置），不是必需。群聊、陌生人、生气、回避、睡着时永远不会走身体层。"
+      },
+      "adult_consent_hours": {
+        "type": "float",
+        "description": "成人向同意有效期（小时）",
+        "default": 24.0,
+        "hint": "填 0 = 长期有效，直到 /adult off。默认 24 小时；到期后可以重新 /adult on，也可以在当前场景直接明确同意，不是只能靠命令。",
+        "invisible": true
+      },
+      "scene_consent_minutes": {
+        "type": "float",
+        "description": "自然语言场景同意有效期（分钟）",
+        "default": 60.0,
+        "hint": "对话里明确说“可以/想继续”等，只对当前场景有效，默认 60 分钟。",
+        "invisible": true
+      },
+      "consent_window_minutes": {
+        "type": "float",
+        "description": "弱肯定回答的窗口（分钟）",
+        "default": 10.0,
+        "hint": "只有她刚问过“想继续吗/可以继续吗”后的这个窗口内，“嗯/好/行/可以”才算同意。",
+        "invisible": true
+      },
+      "inject_interval_minutes": {
+        "type": "float",
+        "description": "欲主动提示的注入间隔（分钟）",
+        "default": 5.0,
+        "hint": "正常聊天里每隔这么久最多注入一次欲的主动提示；主动消息不受此限制。填 0 = 每轮都注入。",
+        "invisible": true
+      },
+      "peak_hold_hours": {
+        "type": "float",
+        "description": "欲到 100 后的收益减半时长（小时）",
+        "default": 6.0,
+        "hint": "欲刚到 100 时开始计时；在这段时间内，正向涨欲收益减半。填 0 = 关闭这个饱和期。",
+        "invisible": true
+      }
+    }
+  },
   "debug": {
     "type": "bool",
     "description": "调试日志",
     "default": false,
     "hint": "打开后每次心跳 / 注入 / 主动说话都写一条日志。"
+  },
+  "diagnostics": {
+    "type": "object",
+    "description": "🧾 影响日志",
+    "items": {
+      "log_affect": {
+        "type": "bool",
+        "description": "记录每条对话对心境的影响",
+        "default": false,
+        "hint": "打开后，每收到一条消息都会写一条 [鱼的心][影响] 日志：原文、私聊/群聊、发言人、识别到的事件、实际增量、变化前后的九维/责怪/期待/档位/心情；没有触发事件的也会记。含聊天原文，注意隐私，默认关闭。"
+      }
+    }
   }
 }

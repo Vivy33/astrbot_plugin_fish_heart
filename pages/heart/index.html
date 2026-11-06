@@ -99,6 +99,24 @@
     <ul class="inject-list" id="injectList"></ul>
     <p class="empty" id="injectEmpty">还没有会话报到过 —— 去私聊跟她说一句话，她注入心境后这里就会记下是哪个会话、什么时候。</p>
   </section>
+
+  <section class="card card-desire" id="desireCard" hidden>
+    <div class="card-head"><h2>隐藏的欲</h2><span class="hint" id="desireHint">关系满格后解锁</span></div>
+    <div class="desire-body">
+      <div class="desire-left">
+        <div class="desire-top">
+          <div class="desire-score"><b id="desireValue">0</b><span>/100</span></div>
+          <div class="desire-stage" id="desireStage">—</div>
+        </div>
+        <div class="desire-bar"><i id="desireFill"></i></div>
+        <p class="desire-status" id="desireStatus"></p>
+      </div>
+      <div class="desire-right">
+        <p class="desire-log-head">最近涨落</p>
+        <ul class="desire-log" id="desireLog"></ul>
+      </div>
+    </div>
+  </section>
 </main>
 
 <div class="toast" id="toast" hidden></div>

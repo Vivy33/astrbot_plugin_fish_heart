@@ -25,11 +25,11 @@
   }
 
   const MODES = {
-    calm: { cn: "平静", color: "#4fd1c5" },
-    wronged: { cn: "委屈", color: "#f6ad55" },
-    angry: { cn: "生气", color: "#ff6b6b" },
-    afraid: { cn: "害怕", color: "#a78bfa" },
-    shut: { cn: "回避", color: "#f17a8a" },
+    calm: { cn: "日常", tag: "没在生气", color: "#4fd1c5" },
+    wronged: { cn: "委屈", tag: "委屈", color: "#f6ad55" },
+    angry: { cn: "生气", tag: "生气", color: "#ff6b6b" },
+    afraid: { cn: "害怕", tag: "害怕", color: "#a78bfa" },
+    shut: { cn: "回避", tag: "回避", color: "#f17a8a" },
   };
 
   const DRIVE_ORDER = [
@@ -342,9 +342,12 @@
     $("pLast").textContent = fmtAgo(last);
     $("pWaiting").textContent = d.awaiting_reply ? "是" : "否";
 
+    const mood = moodText(d);
+    const tag = d.mode === "calm" && !d.mind_knot
+      ? ""
+      : ` · ${d.mode_tag_cn || MODES[d.mode]?.tag || ""}`;
     $("proactiveHint").textContent =
-      `${MODES[d.mode]?.cn || d.mode} · ${!d.enabled ? "已暂停" : (!proactiveOn ? "主动说话已关" : (!limit ? "无主动额度" : (count >= limit ? "今日已满" : "心跳中")))}`;
-    $("moodBadge").textContent = d.mood_cn || "平常";
+      `${mood}${tag} · ${!d.enabled ? "已暂停" : (!proactiveOn ? "主动说话已关" : (!limit ? "无主动额度" : (count >= limit ? "今日已满" : "心跳中")))}`;
 
     const chips = [
       ["冷却", `${cfg.cooldown_hours}h`],
@@ -429,6 +432,46 @@
     joy: "喜悦", blame: "责怪", expectation: "期待",
   };
 
+  function renderDesire(d) {
+    const card = $("desireCard");
+    const on = !!d.desire_awakened && Number.isFinite(Number(d.desire));
+    card.hidden = !on;
+    if (!on) return;
+
+    const value = clamp100(d.desire);
+    $("desireValue").textContent = Math.round(value);
+    $("desireStage").textContent = d.desire_stage || "";
+    $("desireFill").style.width = `${value}%`;
+    const status = [];
+    if (d.desire_adult_status) status.push(d.desire_adult_status);
+    if (d.desire_bond_full === false) status.push("关系未满，正在退潮");
+    if (d.desire_satiated) status.push("饱和中 · 收益减半");
+    $("desireStatus").textContent = status.join(" · ");
+    $("desireHint").textContent = "已解锁";
+
+    const ul = $("desireLog");
+    ul.replaceChildren();
+    const rows = Array.isArray(d.desire_log) ? d.desire_log.slice(-5) : [];
+    if (!rows.length) {
+      const li = document.createElement("li");
+      li.className = "empty";
+      li.textContent = "还没有记录到涨落。";
+      ul.appendChild(li);
+      return;
+    }
+    [...rows].reverse().forEach((row) => {
+      const li = document.createElement("li");
+      const why = document.createElement("span");
+      why.textContent = row.why || "变化";
+      const delta = document.createElement("b");
+      const n = Number(row.d || 0);
+      delta.className = n >= 0 ? "up" : "down";
+      delta.textContent = `${n >= 0 ? "+" : ""}${n.toFixed(1)} · ${fmtAgo(row.ts)}`;
+      li.append(why, delta);
+      ul.appendChild(li);
+    });
+  }
+
   function renderEvents(list) {
     const ul = $("eventList");
     ul.replaceChildren();
@@ -490,23 +533,38 @@
       .sort((a, b) => Number(b.blame || 0) - Number(a.blame || 0))[0] || null;
   }
 
-  function applyMode(mode, knot, targets) {
+  /** 主徽章文字：日常且没有明显心情时写“日常”，别写“平常/平静”绕人。 */
+  function moodText(d) {
+    const mood = d.mood_cn || "平常";
+    if (mood === "平常" && d.mode === "calm") return "日常";
+    return mood;
+  }
+
+  function applyMode(mode, knot, targets, modeTag) {
     const m = MODES[mode] || MODES.calm;
     document.documentElement.style.setProperty("--mode", m.color);
     document.documentElement.style.setProperty("--mode-soft", hexToSoft(m.color));
-    const badge = $("modeBadge");
+    // 第一枚 badge 显示“心情”（黏人/开心/累了…），颜色仍按责怪档走；
+    // 第二枚 badge 显示“责怪档”（日常=没在生气/委屈/生气…）。
     // 心结：责怪被夹在 40，档位会永远停在「委屈」。不标出来，
     // 用户只会看到一个找不到出处的委屈徽章。
     const stuck = !!knot && mode === "wronged";
     const who = mode === "angry" ? topAngerTarget(targets) : null;
     const target = who ? `·对${String(who.label).slice(0, 8)}` : "";
-    badge.textContent = stuck ? `${m.cn}·旧账` : `${m.cn}${target}`;
-    badge.dataset.mode = mode;
-    badge.title = stuck
+    const tag = String(modeTag || m.tag || m.cn || "").replace(/·旧账$/, "");
+    const tagText = stuck ? `${tag}·旧账` : `${tag}${target}`;
+    const tagBadge = $("moodBadge");
+    // 日常不显示“没在生气”第二枚：主徽章已经说清心情，下面再写一遍
+    // 只会变成「黏人 · 没在生气 · 期待 0 · 责怪 0」。委屈/生气/害怕/回避
+    // 才需要这枚副标签。
+    tagBadge.style.display = (mode === "calm" && !stuck && !who) ? "none" : "";
+    tagBadge.textContent = tagText;
+    tagBadge.title = stuck
       ? "责怪已经停在 40（心结），不会再自己往下掉：哄/道歉，或 /心 calm 才能解"
       : who
         ? `她在生 ${who.label} 的气（责怪贡献 ${Math.round(who.blame || 0)}）；对其他人只是委屈/难受`
-        : "";
+        : `责怪档：${m.cn}${mode === "calm" ? "（没在生气）" : ""}`;
+    $("modeBadge").dataset.mode = mode;
   }
 
   /** 责怪那一行：数值 + 心结说明 + 最近一次责怪的原句（她"说不出来由"时就靠它）。
@@ -576,13 +634,16 @@
   }
 
   function render(d) {
-    applyMode(d.mode, d.mind_knot, d.anger_targets);
+    applyMode(d.mode, d.mind_knot, d.anger_targets, d.mode_tag_cn);
     document.body.dataset.mode = d.mode;
 
+    $("modeBadge").textContent = moodText(d);
+    $("modeBadge").title =
+      `她的心情：${moodText(d)}；外圈颜色按责怪档：${MODES[d.mode]?.cn || d.mode}`;
     const ver = d.plugin_version ? `v${d.plugin_version} · ` : "";
-    const knot = d.mind_knot && d.mode === "wronged" ? "（心结·旧账）" : "";
+    // 心情和责怪档已经在两枚徽章上；副标题只留数值，避免同一句里再说一遍。
     $("subtitle").textContent =
-      `${ver}此刻${MODES[d.mode]?.cn || ""}${knot} · 期待 ${Math.round(d.expectation)} · 责怪 ${Math.round(d.blame)}`;
+      `${ver}期待 ${Math.round(d.expectation)} · 责怪 ${Math.round(d.blame)}`;
     $("tickHint").textContent = `心跳 ${fmtAgo(d.last_tick)}`;
 
     const hint = d.hint || "";
@@ -598,6 +659,7 @@
     guard("雷达", () => drawRadar(drives));
     guard("图例", () => renderRadarLegend(d));
     guard("此刻", () => renderVitals(d));
+    guard("隐藏的欲", () => renderDesire(d));
     guard("念头", () => {
       renderThoughts(d.thoughts || [], d.recent_rewards || [],
         d.settle_cooldown_left, d.last_let_go);
@@ -701,7 +763,7 @@
       } else if (res && res.data && res.data.mode === "shut") {
         toast("她在回避，主动说话被冻结，这次只跳了心跳");
       } else {
-        toast(sent ? "她刚开口了，去看看消息" : "这次没开口（概率未命中）");
+        toast(sent ? "她刚开口了，去看看消息" : "这次没开口（概率/冷却/目标会话格式，详情看日志）");
       }
       await load();
     } catch (e) {

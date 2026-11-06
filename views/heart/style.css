@@ -299,6 +299,87 @@ body::before {
    也不要像以前那样直接被 overflow:hidden 切掉半行 */
 .card-vitals { overflow-y: auto; scrollbar-width: thin; }
 
+/* 隐藏的欲：只在解锁后出现；横跨整行放在六张卡之后，不挤占其他卡位 */
+.card.card-desire {
+  grid-column: 1 / -1;
+  height: auto;
+  min-height: 210px;
+  overflow: hidden;
+}
+.desire-body {
+  display: grid;
+  grid-template-columns: minmax(260px, 0.85fr) minmax(0, 1.15fr);
+  gap: 30px;
+  align-items: start;
+  margin-top: 4px;
+}
+.desire-left, .desire-right { min-width: 0; }
+.desire-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: flex-start;
+  gap: 14px;
+  margin: 0 0 10px;
+}
+.desire-score { display: flex; align-items: baseline; gap: 4px; }
+.desire-score b { font-size: 34px; line-height: 1; color: #f6ad55; }
+.desire-score span { color: var(--muted); font-size: 12px; }
+.desire-stage {
+  padding: 5px 10px;
+  border-radius: 999px;
+  color: #f6ad55;
+  background: rgba(246, 173, 85, 0.12);
+  border: 1px solid rgba(246, 173, 85, 0.28);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.desire-bar {
+  height: 10px;
+  border-radius: 999px;
+  background: var(--line);
+  overflow: hidden;
+}
+.desire-bar i {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #f6ad55, #ff7a7a);
+  transition: width 0.5s var(--ease);
+}
+.desire-status {
+  margin: 14px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+.desire-log-head {
+  margin: 0 0 8px;
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.desire-log {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+.desire-log li {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 9px;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.035);
+  font-size: 12px;
+  color: var(--muted);
+}
+.desire-log .up { color: #f6ad55; }
+.desire-log .down { color: #7dd3fc; }
+.desire-log .empty { justify-content: center; opacity: 0.7; }
+
 .card:nth-child(1) { animation-delay: 0.02s; }
 .card:nth-child(2) { animation-delay: 0.06s; }
 .card:nth-child(3) { animation-delay: 0.10s; }
@@ -768,6 +849,7 @@ body::before {
   .hero { min-height: 168px; padding: 18px 20px; }
   .rings { grid-template-columns: repeat(2, 1fr); }
   .stats { grid-template-columns: repeat(2, 1fr); }
+  .desire-body { grid-template-columns: minmax(0, 1fr); gap: 16px; }
   .topbar { flex-wrap: wrap; }
 }
 
