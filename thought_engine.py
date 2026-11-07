@@ -65,7 +65,8 @@ KIND_META: dict[str, dict] = {
         "done": "被他夸了，心里甜甜的",
         "reward": {"joy": 6, "intimacy": 4, "attachment": 2},
         "release": {"joy": -1},
-        "events": ("praise",),
+        # 明确夸奖和含蓄夸奖（"小棉袄""贴心""真乖"）都算把她夸到了
+        "events": ("praise", "praise_soft"),
         "trigger": lambda d, e, w: (
             1.0 if _g(d, "attachment") >= 40 and _g(d, "joy") < 78 else 0.0
         ),
@@ -200,7 +201,11 @@ KEYWORD_KINDS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("miss", ("想你", "想我", "有没有想我", "惦记")),
     ("hug", ("抱", "贴贴", "搂", "亲亲", "撒娇")),
     ("company", ("陪你", "陪陪", "聊会儿", "说说话")),
-    ("praise", ("厉害", "真棒", "谢谢", "可爱", "喜欢你", "爱你", "真好", "优秀", "夸")),
+    # 和 main.KW_PRAISE 保持一致（这里只做"反推是哪条念头"，
+    # 真正的判定在 main._hits_praise；含蓄夸奖靠 praise_soft 事件喂饱）。
+    # "真好" 不在这里："真好吃""真好玩"会被误当成夸她。
+    ("praise", ("厉害", "真棒", "太棒", "好棒", "优秀", "了不起", "佩服",
+                "可爱", "喜欢你", "爱你", "谢谢", "夸夸你", "夸你")),
     ("ask_day", ("过得", "怎么样", "怎么样呀", "顺利", "累不累", "还好吗")),
     ("task", ("帮我", "给你", "安排", "做点", "需要我", "帮个忙")),
     ("talk", ("今天", "跟你说", "告诉你", "我跟你讲")),
@@ -210,7 +215,7 @@ KEYWORD_KINDS: tuple[tuple[str, tuple[str, ...]], ...] = (
 # 面板上的"怎么才会完成"——只做展示，不参与判定。
 # 用户反馈"每个念头都没完成"，很多时候是不知道什么话才算数。
 THOUGHT_HOW: dict[str, str] = {
-    "praise": "夸她一句（厉害/真棒/可爱…）",
+    "praise": "夸她一句（厉害/真棒/可爱…）；夸到点子上也算：小棉袄/贴心/真乖",
     "miss": "说想她（想你/想我/惦记）",
     "hug": "哄她或抱抱（抱/贴贴/亲亲/撒娇）",
     "talk": "回她一句就行",
@@ -317,11 +322,19 @@ def settle(
     text: str,
     mode: str,
     now: float | None = None,
+    skip_text_kinds: tuple[str, ...] = (),
 ) -> dict | None:
-    """本轮最多喂饱一个念头，返回 {kind, text, mood, reward} 或 None。"""
+    """本轮最多喂饱一个念头，返回 {kind, text, mood, reward} 或 None。
+
+    `skip_text_kinds` 用来挡住"文本看着像、实际不算"的情况：
+    比如他夸过了头，事件已经是 `praise_bored`，这句话里的"真棒"就不该再
+    把「想被夸」喂饱。
+    """
     now = time.time() if now is None else now
     evset = set(events or [])
     by_text = match_kind(text)
+    if by_text in skip_text_kinds:
+        by_text = None
     candidates = [
         t
         for t in thoughts or []

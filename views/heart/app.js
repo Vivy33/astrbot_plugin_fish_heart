@@ -358,8 +358,7 @@
           ? `睡着（${d.sleep.wake} 起）`
           : `${d.sleep.bedtime}-${d.sleep.wake}${d.sleep.stay_up ? " 熬夜" : ""}`)
         : "关"],
-      ["分段发送", cfg.segment_reply ? "开" : "关"],
-      ["群聊全员", cfg.group_everyone
+      ["群友模式", cfg.group_everyone
         ? `开 主×${cfg.group_owner_scale ?? 1} 群×${cfg.group_scale ?? 0.5} 负 群${cfg.group_negative_scale ?? 0.35}/主${cfg.group_owner_negative_scale ?? 0.5}`
         : "关"],
       ["念头", d.thought_enabled ? "开" : "关"],
@@ -380,6 +379,7 @@
 
     // 她"现在为什么安静 / 能不能开口"——把三个闸门直白讲出来
     let readiness;
+    let readinessHidden = false; // 顶部四块已经写了同一件事时，这句不再重复
     if (!d.enabled) {
       readiness = "总开关已关闭，她不会主动开口。";
     } else if (d.mode === "shut") {
@@ -409,11 +409,15 @@
     } else if (count >= limit) {
       readiness = `今天的 ${limit} 次已经用完了，明天再来。`;
     } else if (remain > 0) {
+      // 「冷却剩余」那一块已经在倒计时了，这里再说一遍就是重复
       readiness = `冷却中，还要等 ${fmtSpan(remain)}。`;
+      readinessHidden = true;
     } else {
       readiness = "随时可能开口 —— 取决于她的心情，和那一次概率。";
     }
-    $("readiness").textContent = readiness;
+    const readinessBox = $("readiness");
+    readinessBox.textContent = readiness;
+    readinessBox.hidden = readinessHidden;
   }
 
   /** 只在展示层过滤：去掉语气标记（&&soft&&）与媒体占位（[图片]），原始数据不动 */

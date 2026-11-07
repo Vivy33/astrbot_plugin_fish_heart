@@ -108,7 +108,7 @@ def _thought_summary(thoughts: list) -> list:
 
 
 PLUGIN_NAME = "astrbot_plugin_fish_heart"
-VERSION = "0.3.8"
+VERSION = "0.3.9"
 
 # 注入钩子优先级：AstrBot 按优先级 **降序** 执行。
 # 天使之心 = 40，TTS = 0，这里用 -10 表示最后一个执行（只追加、不覆盖）。
@@ -184,6 +184,16 @@ RELATION_ERODE_PER_TICK = 0.15
 # 不加这个的话，增益是按消息条数线性累加的，一晚上 30 条就能把社交顶到 70。
 HEAT_WINDOW_SEC = 10 * 60
 HEAT_DIVISOR = 12.0
+
+# 夸奖疲劳：同一个人在窗口内反复夸她，第 3 次开始"没那么受用"，第 5 次明确嫌烦。
+# 只统计"真的在夸她"（praise / praise_soft），不统计日常档里由"抱抱/想你/辛苦了"
+# 映射出来的 praise；按说话人各记一桶，群里 A 夸到腻不会连坐 B。
+# 事件 effect 固定，不再乘热度，否则连夸会被 heat/天花板/日限三重打折。
+PRAISE_FATIGUE_WINDOW_SEC = 30 * 60
+PRAISE_FATIGUE_LEVEL1 = 3   # 3–4 次：听腻了，只剩一点点正面
+PRAISE_FATIGUE_LEVEL2 = 5   # 5 次及以上：夸过头了，明确不买账
+PRAISE_FATIGUE_KEEP = 50    # 每人最多留 50 条时间戳，防状态膨胀
+PRAISE_FATIGUE_EVENTS = ("praise_tired", "praise_bored")
 
 # 疲惫的边际递减：越累，"再聊一句"加的那点疲惫越少。
 # 不做这个的话 +0.6/条 是线性的，150 条/天上午就顶到 100，
@@ -282,6 +292,13 @@ EVENT_EFFECTS = {
     "silent_24h": {"stress": 10.0, "attachment": -3.0, "joy": -5.0},
     # 夸奖 / 感谢
     "praise": {"joy": 7.0, "intimacy": 3.5, "stress": -3.0, "attachment": 1.6},
+    # 含蓄夸奖（"你真是我的小棉袄""你真贴心""真乖"）：
+    # 算夸，但比"你真棒"轻一档——间接的夸听得出来，不该和明夸同价。
+    "praise_soft": {"joy": 4.0, "intimacy": 1.8, "stress": -1.5, "attachment": 0.8},
+    # 同一人反复夸：第 3–4 次"听腻了"，第 5 次起"夸过头了"。
+    # 只到腻/烦：不加 blame、不扣依恋，压力也只给一点点，别让夸奖把关系聊坏。
+    "praise_tired": {"joy": 1.5, "intimacy": 0.5, "stress": 0.5},
+    "praise_bored": {"joy": -1.0, "stress": 2.0},
     # 责怪三档
     # 对关系的打击调小：一句重话该伤的是"情绪"（压力/喜悦/责怪），
     # 不是"关系"。当场把依恋砍掉，就只剩生气，出不来"又气又想你"。
@@ -309,6 +326,7 @@ DESIRE_EVENT_DELTA = {
     "tease": 3.0,
     "seeking": 2.0,
     "praise": 1.0,
+    "praise_soft": 0.6,
     "share": 0.8,
     "reply_fast": 1.5,
     "comfort": -4.0,
@@ -327,7 +345,9 @@ DESIRE_EVENT_DELTA = {
 
 # 事件的中文名（面板「最近的变化」用）
 EVENT_CN = {
-    "user_msg": "说话", "praise": "夸奖", "comfort": "哄她", "seeking": "撒娇",
+    "user_msg": "说话", "praise": "夸奖", "praise_soft": "含蓄夸奖",
+    "praise_tired": "夸奖（听腻了）", "praise_bored": "夸奖（夸过头了）",
+    "comfort": "哄她", "seeking": "撒娇",
     "apology": "道歉", "explain": "解释", "share": "分享", "request": "求助", "tease": "调侃",
     "goodnight": "晚安", "reply_fast": "及时回", "silent_6h": "沉默 6h",
     "silent_24h": "沉默 24h", "blame_mild": "责怪", "blame_mid": "责怪",
@@ -513,6 +533,12 @@ MILD_QUESTION_RE = re.compile(
     r"你怎么(?:会)?(?:知道|发现|看出|看出来|判断|确定|猜到|"
     r"想到|找到|学会|做到|弄到|打开|操作|设置)"
 )
+# “你怎么醒了/还没睡/来了”是在问状态，不是责怪。
+MILD_STATE_QUESTION_RE = re.compile(
+    r"你怎么(?:还|还这么|这么)?"
+    r"(?:醒着|醒了|醒|没睡|不睡|睡|起|来|回|在|到|走|去|"
+    r"忙|有空|这么(?:晚|早|久))"
+)
 KW_FAKE = ("行了别闹", "别闹了", "至于吗", "多大点事", "行了行了", "随便你", "你开心就好", "小题大做")
 # "随便你" 后面接这些是把选择权给他，不是敷衍
 KW_FAKE_EXEMPT = ("随便你点", "随便你选", "随便你挑", "随便你买", "随便你吃", "随便你去")
@@ -668,13 +694,114 @@ def _hits_blame_mild(text: str) -> bool:
         if k == "你怎么" and (
             any(x in text for x in KW_MILD_EXEMPT)
             or MILD_QUESTION_RE.search(text)
+            or MILD_STATE_QUESTION_RE.search(text)
         ):
             continue
         return True
     return False
+
+
 KW_COMFORT = ("对不起", "抱歉", "我错了", "别生气", "不气了", "哄", "抱抱", "亲亲",
               "我在呢", "想你", "乖", "没事的", "原谅", "辛苦了", "好啦")
-KW_PRAISE = ("厉害", "真棒", "谢谢", "可爱", "喜欢你", "爱你", "真好")
+
+# 夸奖分两档：
+#   praise      —— 明确在夸她 / 谢她（"你真棒""好厉害""谢谢"）
+#   praise_soft —— 听得出来的间接夸奖（"你真是我的小棉袄""你真贴心""真乖"）
+# 后者以前不在任何词表里，直接被当成普通说话，等于白夸；现在算数，但份量小一档。
+# 注意："真好" 从裸词表里拿掉了——"你今天做的饭真好吃""真好玩"都会被裸子串误伤，
+# 改成只认指向她的句式（见 PRAISE_STRONG_RE）。
+KW_PRAISE = ("厉害", "真棒", "太棒", "好棒", "优秀", "了不起", "佩服",
+             "可爱", "喜欢你", "爱你", "谢谢")
+
+# 这些说法单独拆开容易误伤（"真好吃""牛奶"），只在明确指向她时才算
+PRAISE_STRONG_RE = re.compile(
+    r"你(真|太|好)棒"
+    r"|你(真|太|好)厉害"
+    r"|你真(优秀|可爱|了不起)"
+    r"|你真好|你对我真好|真好(呀|啊|呢)"
+    r"|(真|太|好)牛(逼|啊|了|！|!|$)"
+    r"|夸(夸)?你|值得夸|该夸夸"
+)
+
+# 明确否定不算夸奖（"你不乖""不贴心""不够优秀"）
+PRAISE_NEG_RE = re.compile(
+    r"不(够|太)?(厉害|棒|优秀|可爱|乖巧|贴心|懂事|温柔|乖|省心|听话|善良)"
+)
+
+# 含蓄夸奖：夸的是"她这个人"，不是"那件事好看/好吃"
+KW_PRAISE_SOFT = (
+    "小棉袄", "贴心", "懂事", "温柔", "贤惠", "善良", "体贴", "乖巧",
+    "省心", "乖宝宝", "乖孩子", "真乖", "好乖", "最乖", "很乖", "挺乖",
+    "这么乖", "真听话", "好听话", "小天使",
+)
+# 整句就一个"乖"（"乖""乖呀""乖啦"）算夸；"乖，别闹"是哄，不算
+PRAISE_BARE_GUAI_RE = re.compile(r"^乖(呀|哦|啦|哈|～|~|!|！|。|，|,)*$")
+# 没有"你"时，出现这些词说明在说别人（"我女儿真是我的小棉袄"）
+PRAISE_SOFT_THIRD = ("我妈", "我爸", "我女儿", "我儿子", "我朋友", "我室友",
+                     "我舍友", "我同事", "我妹", "我姐", "我哥", "我弟",
+                     "他们", "她们", "别人", "他", "她")
+# 没有"你"时，出现这些词说明夸的是"某样东西/某个人"，不是她：
+# "这件小棉袄真好看""这首歌很温柔""这孩子真懂事""狗挺乖的"
+PRAISE_SOFT_OBJECT = (
+    "这件", "那条", "这首", "这本", "这部", "这个", "那个", "这些", "那些",
+    "孩子", "小孩", "小朋友", "狗", "猫", "歌", "电影", "书", "衣服", "裙子",
+    "好看", "好听", "好吃", "好玩", "好喝",
+)
+# 反问不算："你是不是很温柔"
+PRAISE_SOFT_QUESTION_RE = re.compile(r"是不是|有没有|难道")
+# 哄人的话，不是夸
+PRAISE_SOFT_COMFORT = ("别闹", "别哭", "别气", "别怕", "别急", "别吵", "不哭")
+
+
+def _hits_praise(text: str, soft: bool = True) -> str:
+    """夸奖识别，返回 "praise"（明确）/ "praise_soft"（含蓄）/ ""（不算）。
+
+    `soft=False` 时退回旧口径：只认明确夸奖词。
+    """
+    t = (text or "").strip()
+    if not t or PRAISE_NEG_RE.search(t):
+        return ""
+    if any(k in t for k in KW_PRAISE) or PRAISE_STRONG_RE.search(t):
+        return "praise"
+    if soft and _hits_praise_soft(t):
+        return "praise_soft"
+    return ""
+
+
+def _hits_praise_soft(text: str) -> bool:
+    """间接夸奖：必须能确认是在夸她，而不是在说别人、哄小孩或反问。"""
+    t = (text or "").strip()
+    if not t or any(k in t for k in PRAISE_SOFT_COMFORT):
+        return False
+    # 问句不算："你贴心吗""你乖不乖"
+    if t.rstrip("。！!～~ ").endswith(("吗", "么", "不")):
+        return False
+    if PRAISE_SOFT_QUESTION_RE.search(t):
+        return False
+    hit = any(k in t for k in KW_PRAISE_SOFT) or bool(PRAISE_BARE_GUAI_RE.match(t))
+    if not hit:
+        return False
+    # 没有"你"、却在说别人 → 不算
+    if "你" not in t and any(k in t for k in PRAISE_SOFT_THIRD):
+        return False
+    # 没有"你"的时候只接受很短的、明显在说她的说法（"小棉袄""真乖"）；
+    # 出现"这件/歌/孩子/狗/好看"这类主体词，就当成在说别的东西。
+    if "你" not in t and (
+        len(t) > 6 or any(k in t for k in PRAISE_SOFT_OBJECT)
+    ):
+        return False
+    return True
+
+
+def _comfort_not_for_her(text: str) -> bool:
+    """日常档里"乖/抱抱/想你"会被映射成夸奖；但"狗挺乖的""孩子真乖"
+    说的是别人/别的东西，不能算夸她。"""
+    t = (text or "").strip()
+    if "你" in t:
+        return False
+    return any(k in t for k in PRAISE_SOFT_THIRD + PRAISE_SOFT_OBJECT)
+
+
 # 求安慰 / 撒娇。
 # 这里**不放**"累""怕""抱"这种高频字：一句"今天上班好累"不该被当成撒娇
 # （那只是普通说话，加社交/喜悦/疲惫），"抱怨""哪怕""恐怕"也会被误伤。
@@ -981,6 +1108,8 @@ def new_state() -> dict:
         "last_owner_group_msg": 0.0,
         "last_assistant_msg": 0.0,
         "last_proactive": 0.0,
+        # 睡前兜底上次尝试的时间（失败节流用；成功与否都记）
+        "last_guarantee_ts": 0.0,
         # 上一次主动开口的原文：用来避免下次又用同一个开头（尤其是"忙不忙"）
         "last_proactive_text": "",
         "proactive_day": "",
@@ -1025,10 +1154,14 @@ def new_state() -> dict:
         "group_tail": [],
         # 同类事件的"热度"（最近 10 分钟各发生了几次），用来压正向增益
         "event_heat": {},
+        # 夸奖疲劳：按说话人记最近 30 分钟被夸的时间戳（听腻了用）
+        "praise_recent": {},
         # 今天"他"已经给她涨了多少（按维度），到点清零
         "daily_gain": {},
         "daily_gain_day": "",
         "umo": "",
+        # 他最近一次私聊用的会话：群友模式想主动私聊他时，优先发回这里
+        "last_owner_dm_umo": "",
         "recent": [],
         "recent_events": [],
     }
@@ -1062,6 +1195,27 @@ def fmt_gap(seconds: float) -> str:
 # 三、插件主体
 # --------------------------------------------------------------------------- #
 
+# 群友模式的配置在 0.3.9 挪进独立的 `group_mode` 段；旧键（perception/proactive 下）
+# 仍然认，第一次启动会合并进新段并写回配置。
+GROUP_CFG_LEGACY = {
+    "enabled": "perception.group_everyone",
+    "owner_scale": "perception.group_owner_scale",
+    "member_scale": "perception.group_scale",
+    "member_negative_scale": "perception.group_negative_scale",
+    "owner_negative_scale": "perception.group_owner_negative_scale",
+    "dm_ratio": "proactive.group_dm_ratio",
+    "dm_umo": "proactive.dm_umo",
+}
+GROUP_CFG_DEFAULTS = {
+    "enabled": False,
+    "owner_scale": 1.0,
+    "member_scale": 0.5,
+    "member_negative_scale": 0.35,
+    "owner_negative_scale": 0.5,
+    "dm_ratio": 0.0,
+    "dm_umo": "",
+}
+
 @register(PLUGIN_NAME, "LLL", "让角色拥有会慢慢变化的心境：九维驱动、委屈/生气/害怕/回避、主动说话与语音", VERSION)
 class EmotionCore(Star):
     def __init__(self, context: Context, config: dict | None = None):
@@ -1088,6 +1242,7 @@ class EmotionCore(Star):
         self.state_path = os.path.join(data_dir, "state.json")
         self.state = self._load_state()
         self._migrate_config_036()
+        self._migrate_group_mode()
         # 成人向总开关关闭时，不保留任何旧的“同意”状态；重新打开也不会
         # 恢复上一次的授权。欲本身可以继续隐藏积累，但身体层永远进不去。
         if not self._adult_enabled():
@@ -1174,6 +1329,69 @@ class EmotionCore(Star):
         self._save_state()
         logger.info("[鱼的心] 0.3.6 迁移：group_negative_scale 0.8 → 0.35")
 
+    def _cfg_group(self, key: str, default: Any = None) -> Any:
+        """读群友模式配置：先看 `group_mode.<key>`，没有再回落到旧路径。
+
+        0.3.9 把这几项从 `perception`/`proactive` 挪进独立的 `group_mode` 段；
+        老配置还没迁移（或迁移写盘失败）时也能照常读，行为不变。
+        """
+        if default is None:
+            default = GROUP_CFG_DEFAULTS.get(key)
+        val = self._cfg(f"group_mode.{key}", None)
+        if val is not None:
+            return val
+        legacy = GROUP_CFG_LEGACY.get(key)
+        if legacy:
+            val = self._cfg(legacy, None)
+            if val is not None:
+                return val
+        return default
+
+    def _migrate_group_mode(self) -> None:
+        """把群友模式的旧配置并进顶层 `group_mode` 段（幂等，不覆盖新值）。
+
+        只处理真正带 save_config 的 AstrBotConfig；测试 / 普通 dict 不碰。
+        `group_mode` 里已经有的键不覆盖——用户在新面板里改过的值优先。
+        """
+        save = getattr(self.cfg, "save_config", None)
+        if not callable(save):
+            return
+        gm = self.cfg.get("group_mode")
+        if not isinstance(gm, dict):
+            gm = {}
+        moved = {}
+        for key, legacy in GROUP_CFG_LEGACY.items():
+            if gm.get(key) is not None:
+                continue
+            cur = self._cfg(legacy, None)
+            if cur is None:
+                continue
+            gm[key] = cur
+            moved[key] = cur
+        if not moved:
+            return
+        self.cfg["group_mode"] = gm
+        dropped = []
+        for legacy in GROUP_CFG_LEGACY.values():
+            parent_path, _, leaf = legacy.rpartition(".")
+            parent = self.cfg.get(parent_path)
+            if isinstance(parent, dict) and leaf in parent:
+                dropped.append((parent, leaf, parent[leaf]))
+                parent.pop(leaf, None)
+        try:
+            save()
+        except Exception as e:
+            for parent, leaf, val in dropped:
+                parent[leaf] = val
+            logger.warning(
+                "[鱼的心] 群友模式配置迁移写盘失败，下次启动重试: %s", e
+            )
+            return
+        logger.info(
+            "[鱼的心] 群友模式配置已合并到 group_mode：%s",
+            "、".join(sorted(moved)),
+        )
+
     def _dbg(self, msg: str, *args) -> None:
         if self._cfg("debug", False):
             logger.info("[鱼的心] " + msg, *args)
@@ -1224,7 +1442,7 @@ class EmotionCore(Star):
             return 1.0
 
         base = float(self._cfg("channel.group_base_weight", 0.35))
-        if bool(self._cfg("perception.group_everyone", False)):
+        if bool(self._cfg_group("enabled", False)):
             # 群友模式：纯群聊部署可能很久没私聊过，衰减基准改看群里的最近发言，
             # 否则所有人都被压在 0.25 档，等于没影响
             last_active = max(
@@ -1320,11 +1538,11 @@ class EmotionCore(Star):
           群聊：保守当外人（宁可少认，也不让陌生人写心）
           私聊：放行（否则一旦取不到 ID，她就彻底失灵了）
 
-        例外：开了 `perception.group_everyone` 的"群友模式"后，群聊里谁都算"他"
-        （给纯群聊部署用；影响强度由 `perception.group_scale` 再打折）。
+        例外：开了 `group_mode.enabled` 的"群友模式"后，群聊里谁都算"他"
+        （给纯群聊部署用；影响强度由 `group_mode.member_scale` 再打折）。
         """
         if self._is_group(umo) and bool(
-            self._cfg("perception.group_everyone", False)
+            self._cfg_group("enabled", False)
         ):
             return True
 
@@ -2092,11 +2310,32 @@ class EmotionCore(Star):
                     self.state["last_tick"] = now
                     self._save_state()
                     await self._maybe_proactive()
+                # 睡前兜底不跟心跳对齐：心跳 15–45 分钟一次，30 分钟的
+                # "睡前窗口"很容易整个错过，所以这里每 30 秒看一眼。
+                if self._guarantee_due():
+                    await self._maybe_proactive(force_guarantee=True)
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # 心跳不能死
                 logger.warning("[鱼的心] 心跳异常: %s", e)
                 await asyncio.sleep(10)
+
+    def _ensure_loop(self) -> bool:
+        """确保心跳任务在跑。
+
+        启动时总开关是关的，`initialize` 不会建任务；之后 `/心 on` 只改了配置，
+        以前会一直"开着但没心跳"（主动说话、睡前兜底都没有）。这里补建一次。
+        返回是否新建了任务。
+        """
+        if self._task and not self._task.done():
+            return False
+        try:
+            self._task = asyncio.create_task(self._loop(), name="emotion-core-loop")
+        except RuntimeError:  # 没有运行中的事件循环（测试/退出中）
+            return False
+        logger.info("[鱼的心] 心跳已启动（%s 分钟起）",
+                    self._cfg("tick.base_interval_minutes", 45))
+        return True
 
     def _tick_interval(self) -> float:
         base = float(self._cfg("tick.base_interval_minutes", 45))
@@ -2434,12 +2673,18 @@ class EmotionCore(Star):
         if cooldown and now - float(st.get("last_settle_ts", 0.0) or 0.0) < cooldown:
             self._dbg("念头冷却中，先不结算")
             return None
+        # "夸过头了"这句不该再喂饱「想被夸」：文本里明明有"真棒"，
+        # 光靠 match_kind 会把它当成一次有效夸奖。
+        skip_text_kinds: tuple[str, ...] = ()
+        if any(e in PRAISE_FATIGUE_EVENTS for e in (events or [])):
+            skip_text_kinds = ("praise",)
         payload = engine.settle(
             st.get("thoughts") or [],
             events,
             text,
             str(st.get("mode", MODE_CALM)),
             now=now,
+            skip_text_kinds=skip_text_kinds,
         )
         if not payload:
             return None
@@ -2551,35 +2796,33 @@ class EmotionCore(Star):
             return {"desire": actual, "_desire_only": 1.0}
 
         # 好事按渠道权重缩水；坏事在群里按自己的系数走。
-        # 群友模式：正向默认乘 group_scale（0.5）压难度；
-        # 负向则普通群友用 group_negative_scale（默认 0.35，养在群里，别一句就炸），
-        # 鱼主用 group_owner_negative_scale（默认 0.5，仍比群友重）。
+        # 群友模式：正向默认乘 group_mode.member_scale（0.5）压难度；
+        # 负向则普通群友用 group_mode.member_negative_scale（默认 0.35，养在群里，
+        # 别一句就炸），鱼主用 group_mode.owner_negative_scale（默认 0.5，仍比群友重）。
         # 非群友模式的群聊仍用 channel.negative_multiplier（默认 1.2，当众被凶更重）。
         mult = weight
-        if is_group and bool(self._cfg("perception.group_everyone", False)):
+        if is_group and bool(self._cfg_group("enabled", False)):
             if name in NEGATIVE_EVENTS:
                 if is_owner:
                     mult = clamp(
-                        float(self._cfg(
-                            "perception.group_owner_negative_scale", 0.5
-                        )),
+                        float(self._cfg_group("owner_negative_scale", 0.5)),
                         0.05, 1.5,
                     )
                 else:
                     mult = clamp(
-                        float(self._cfg("perception.group_negative_scale", 0.35)),
+                        float(self._cfg_group("member_negative_scale", 0.35)),
                         0.05, 1.5,
                     )
             else:
                 if is_owner:
                     # 鱼主不吃群聊渠道权重：1.0 就等于私聊强度
                     mult = clamp(
-                        float(self._cfg("perception.group_owner_scale", 1.0)),
+                        float(self._cfg_group("owner_scale", 1.0)),
                         0.05, 2.0,
                     )
                 else:
                     mult *= clamp(
-                        float(self._cfg("perception.group_scale", 0.5)),
+                        float(self._cfg_group("member_scale", 0.5)),
                         0.05, 1.0,
                     )
         elif is_group and name in NEGATIVE_EVENTS:
@@ -2592,14 +2835,18 @@ class EmotionCore(Star):
         negative_heat = 1.0
         if (
             is_group
-            and bool(self._cfg("perception.group_everyone", False))
+            and bool(self._cfg_group("enabled", False))
             and name in NEGATIVE_EVENTS
         ):
             source = "owner" if is_owner else "member"
             negative_heat = self._heat_factor(f"negative:{source}")
             heat = 1.0
         else:
-            heat = self._heat_factor(name)
+            # 夸奖疲劳用固定数值，不乘热度：否则第 3/5 次会被 heat 再打一次折
+            heat = (
+                1.0 if name in PRAISE_FATIGUE_EVENTS
+                else self._heat_factor(name)
+            )
         applied: dict[str, float] = {}
         for k, dv in eff.items():
             delta = float(dv) * mult * negative_heat
@@ -2689,7 +2936,91 @@ class EmotionCore(Star):
 
     # ---------------- 用户消息感知 ----------------
 
-    def _analyze_user_text(self, text: str, mode: str | None = None) -> list[str]:
+    def _praise_rows(self, speaker_key: str) -> list[float]:
+        """这个说话人最近 30 分钟夸过几次（顺手把过期/超量的清掉）。"""
+        st = self.state
+        book = st.get("praise_recent")
+        if not isinstance(book, dict):
+            book = {}
+            st["praise_recent"] = book
+        key = speaker_key or "owner"
+        now = time.time()
+        rows: list[float] = []
+        for t in book.get(key) or []:
+            try:
+                ts = float(t)
+            except (TypeError, ValueError):
+                continue
+            if now - ts <= PRAISE_FATIGUE_WINDOW_SEC:
+                rows.append(ts)
+        if rows:
+            book[key] = rows[-PRAISE_FATIGUE_KEEP:]
+        else:
+            book.pop(key, None)
+        # 群友很多时桶不能无限长：只留最近 20 个人
+        if len(book) > 20:
+            stale = sorted(
+                book.items(),
+                key=lambda kv: float(max(kv[1]) if kv[1] else 0.0),
+            )[: len(book) - 20]
+            for stale_key, _ in stale:
+                book.pop(stale_key, None)
+        return rows
+
+    def _praise_fatigue_state(self, speaker_key: str = "") -> tuple[int, int]:
+        """只读：返回 (等级 0/1/2, 窗口内次数)。"""
+        if not bool(self._cfg("perception.praise_fatigue", True)):
+            return 0, 0
+        n = len(self._praise_rows(speaker_key))
+        if n >= PRAISE_FATIGUE_LEVEL2:
+            return 2, n
+        if n >= PRAISE_FATIGUE_LEVEL1:
+            return 1, n
+        return 0, n
+
+    def _has_pending_praise(self) -> bool:
+        """她此刻是不是正惦记着被夸（想被夸的念头还没被满足）。"""
+        for t in self.state.get("thoughts") or []:
+            if (
+                isinstance(t, dict)
+                and t.get("pending", True)
+                and str(t.get("kind") or "") == "praise"
+            ):
+                return True
+        return False
+
+    def _praise_event(self, tier: str, speaker_key: str = "") -> str:
+        """按"最近被同一个人夸了几次"决定这次是夸、听腻了、还是夸过头了，并记账。
+
+        只统计真的在夸她的话；日常档里由"抱抱/想你/辛苦了"映射出来的
+        praise 不走这里，所以抱她几次不会让她"听腻夸奖"。
+        """
+        if not tier:
+            return ""
+        if not bool(self._cfg("perception.praise_fatigue", True)):
+            return tier
+        st = self.state
+        rows = self._praise_rows(speaker_key)
+        # 她正惦记着被夸：第一句照常算，别出现"刚撒娇要夸、一夸就嫌烦"
+        craving = self._has_pending_praise()
+        n = len(rows) + 1
+        key = speaker_key or "owner"
+        book = st.get("praise_recent")
+        if not isinstance(book, dict):
+            book = {}
+            st["praise_recent"] = book
+        book[key] = (rows + [time.time()])[-PRAISE_FATIGUE_KEEP:]
+        if craving and n == 1:
+            return tier
+        if n >= PRAISE_FATIGUE_LEVEL2:
+            return "praise_bored"
+        if n >= PRAISE_FATIGUE_LEVEL1:
+            return "praise_tired"
+        return tier
+
+    def _analyze_user_text(
+        self, text: str, mode: str | None = None, speaker_key: str = ""
+    ) -> list[str]:
         """返回本轮应触发的事件名列表（按优先级只取最重要的几个）。
 
         `mode` 是"对当前说话人"的有效档位：群友模式里 A 惹了她，
@@ -2704,6 +3035,8 @@ class EmotionCore(Star):
         t = (text or "").strip()
         st = self.state
         mode = mode or mode_of(float(st.get("blame_pressure", 0.0)))
+        # 含蓄夸奖（"小棉袄""贴心""真乖"）是否算数：默认算，可在面板里关掉
+        soft_praise_on = bool(self._cfg("perception.praise_soft", True))
 
         if not t:
             return events
@@ -2759,8 +3092,20 @@ class EmotionCore(Star):
             st["comfort_streak"] = int(st.get("comfort_streak", 0)) + 1
             st["account_streak"] = int(st.get("account_streak", 0)) + 1
 
+        # 3.4) 含蓄夸奖：以前"小棉袄""贴心""真乖"不在 KW_PRAISE 里，
+        #      直接掉进普通说话——等于白夸。放在哄之前判，是因为"乖"在
+        #      KW_COMFORT 里，不先判就会被"哄"吃掉（委屈档尤其明显）。
+        if not events and _hits_praise(t, soft_praise_on) == "praise_soft":
+            events.append(self._praise_event("praise_soft", speaker_key))
+
         # 3.5) 真诚哄（平静但还有残留冤枉时也算哄）
-        if not events and any(k in t for k in KW_COMFORT):
+        #      "你不乖" 里的"乖"是哄词，但整句是批评，不能当夸奖结算。
+        if (
+            not events
+            and any(k in t for k in KW_COMFORT)
+            and not PRAISE_NEG_RE.search(t)
+            and not _comfort_not_for_her(t)
+        ):
             # "抱抱我"是他在**讨抱**（撒娇），不是他在哄她。
             # `KW_COMFORT` 里有"抱抱"，如果不让路，这句话会被当成哄——
             # 委屈档里他讨个抱就能抵掉 −30 责怪，方向是反的。
@@ -2770,7 +3115,11 @@ class EmotionCore(Star):
                 k in t for k in KW_COMFORT if k != "抱抱"
             )
             if not ask_hug:
-                if mode != MODE_CALM or float(st.get("blame_pressure", 0.0)) > 0.5:
+                # "乖，别闹了""乖，别哭了"是在哄小孩，不是在夸她
+                coax = "乖" in t and any(k in t for k in PRAISE_SOFT_COMFORT)
+                if coax:
+                    events.append("comfort")
+                elif mode != MODE_CALM or float(st.get("blame_pressure", 0.0)) > 0.5:
                     events.append("comfort")
                     # 生气档普通哄不算进度；也不要把"抱抱"偷偷攒到
                     # 之后褪成委屈时再用——那时她已经被哄过一次却没消气。
@@ -2780,6 +3129,7 @@ class EmotionCore(Star):
                     events.append("praise")
 
         # 4) 普通 / 分享 / 道晚安 / 求助 / 夸奖 / 逗她 / 求安慰
+        praise_tier = _hits_praise(t, soft_praise_on)
         if not events:
             if "[图片]" in t or any(k in t for k in KW_SHARE):
                 events.append("share")
@@ -2787,8 +3137,8 @@ class EmotionCore(Star):
                 events.append("goodnight")
             elif any(k in t for k in KW_REQUEST):
                 events.append("request")
-            elif any(k in t for k in KW_PRAISE):
-                events.append("praise")
+            elif praise_tier:
+                events.append(self._praise_event(praise_tier, speaker_key))
             elif any(k in t for k in KW_TEASE):
                 events.append("tease")
             elif _hits_seek(t):
@@ -2964,6 +3314,10 @@ class EmotionCore(Star):
             # 只有"他"的会话才更新"最近跟谁说话"，防止陌生人劫持主动目标
             if umo:
                 self.state["umo"] = umo
+                if not is_group:
+                    # 记下"能私聊到他的会话"：群友模式下想给他发私信时用这个地址，
+                    # 而不是拿群号去猜（群号猜出来只会发错人）。
+                    self.state["last_owner_dm_umo"] = umo
 
             # 先认人：群友模式里 A 惹的生气不能撒到 B 头上。
             owner_sender = self._is_bound_owner(event, umo)
@@ -2979,7 +3333,7 @@ class EmotionCore(Star):
             text = (getattr(event, "message_str", "") or "").strip()
             self._update_adult_consent(event, text, umo)
             self._note_adult_desire(event, text, umo)
-            events = self._analyze_user_text(text, turn_mode_before)
+            events = self._analyze_user_text(text, turn_mode_before, speaker_key)
             if not any(e in NEGATIVE_EVENTS for e in events):
                 judged = await self._maybe_judge_blame(text, umo)
                 if judged:
@@ -3004,7 +3358,7 @@ class EmotionCore(Star):
             if (
                 is_group
                 and owner_sender
-                and bool(self._cfg("perception.group_everyone", False))
+                and bool(self._cfg_group("enabled", False))
             ):
                 weight = 1.0
 
@@ -3227,7 +3581,11 @@ class EmotionCore(Star):
         # 只在"跨档"时注入：mode 变了，或驱动分桶变了。
         # 节流按会话各记一份——心和状态是共用的，但"哪个会话已经报过到"要分开，
         # 否则跨档后只有第一个开口的会话看得到心境，另一个像没心的。
+        # 夸奖疲劳等级也进 sig：它不在九维里，不显式带上就会被 20 分钟节流吞掉。
+        pf_level, _pf_count = self._praise_fatigue_state(speaker_key)
         sig = "|".join(f"{k}:{int(drives[k] // 10)}" for k in DRIVES)
+        if pf_level:
+            sig += f"|pf:{pf_level}"
         gap_min = float(self._cfg("inject.min_gap_minutes", 20))
         now_ts = time.time()
         book = st.get("inject_state")
@@ -3241,21 +3599,27 @@ class EmotionCore(Star):
                 perf = {}
             mode_changed = mode != perf.get("mode")
             sig_changed = sig != perf.get("sig")
+            pf_changed = pf_level != int(perf.get("pf") or 0)
             # 生气是行为开关，而且她每轮都可能在"对谁生气"之间切换：
             # 不能像委屈/害怕那样同档静默——否则下一轮 system prompt 里
             # 没有心境块，她会把上一轮的生气忘掉，按常态说话。
             if mode != MODE_ANGRY:
-                if not mode_changed and not sig_changed:
+                if not mode_changed and not pf_changed and not sig_changed:
                     return ""
                 # 跨档必注：档位是行为开关（尤其进/出"回避"），漏报会让她
                 # 以为自己的心境没变，于是接着按常态说话。
                 # 间隔只用来压制同档内的数值漂移——不然每轮都在抖一格。
-                if not mode_changed and now_ts - float(perf.get("ts", 0.0)) < gap_min * 60:
+                # 夸奖疲劳跨级属于"该开口了"，同样不吃这个间隔。
+                if (
+                    not mode_changed
+                    and not pf_changed
+                    and now_ts - float(perf.get("ts", 0.0)) < gap_min * 60
+                ):
                     return ""
         # 真正报过到才记账：force 且带会话（他直接问心情）也要记，
         # 否则下一轮又会重复报一遍。主动说话那条 umo 为空，不该占用任何会话的名额。
         if key or not force:
-            book[key] = {"ts": now_ts, "mode": mode, "sig": sig}
+            book[key] = {"ts": now_ts, "mode": mode, "sig": sig, "pf": pf_level}
             # 旧字段继续维护，方便 /心 与调试时看"最后一次注入"
             st["last_injection"] = now_ts
             st["last_injection_mode"] = mode
@@ -3296,6 +3660,17 @@ class EmotionCore(Star):
             # 给情绪补一个假的由头（"你上次说好陪我的"）。
             "边界：不要编造没发生过的对话、约定或事件；记不清就说记不清。",
         ]
+        if pf_level == 1:
+            lines.append(
+                "夸奖听多了：他这半小时里夸你夸得有点密，你已经没那么受用了。"
+                "可以半开玩笑地接一句（比如反问、打趣），别冷场，也别直接怼回去。"
+            )
+        elif pf_level >= 2:
+            lines.append(
+                "夸奖听多了：他还在夸，你已经有点烦。"
+                "可以拆穿他（「你是不是有事求我」），或者把话题拉回具体的事；"
+                "别发火、别翻旧账，也别假装还很高兴。"
+            )
         if mode == MODE_ANGRY and speaker_key:
             row = self._anger_target_row(speaker_key)
             if row:
@@ -3479,14 +3854,14 @@ class EmotionCore(Star):
             if is_group
             else float(weight)
         )
-        if is_group and bool(self._cfg("perception.group_everyone", False)):
+        if is_group and bool(self._cfg_group("enabled", False)):
             if is_owner:
                 mult = float(
-                    self._cfg("perception.group_owner_negative_scale", 0.5)
+                    self._cfg_group("owner_negative_scale", 0.5)
                 )
             else:
                 mult = float(
-                    self._cfg("perception.group_negative_scale", 0.35)
+                    self._cfg_group("member_negative_scale", 0.35)
                 )
             mult = clamp(mult, 0.05, 1.5)
         delta = float(EVENT_EFFECTS.get(ev, {}).get("blame", 0.0)) * mult
@@ -3775,11 +4150,73 @@ class EmotionCore(Star):
 
     # ---------------- 主动说话 ----------------
 
+    def _owner_dm_umo(self, hint_umo: str = "") -> str:
+        """找一个"能私聊到鱼主"的会话；找不到返回空。
+
+        优先级：`group_mode.dm_umo`（显式配置）> `proactive.target_umo` >
+        他最近私聊过的会话 >
+        用群会话的平台 + 鱼主的 QQ 拼一个。
+        拼的条件很严：`owner_ids` 里**恰好一个人**。多人时分不清"他是谁"，
+        宁可不发私聊，也不能把话发给群里的某个群友。
+        """
+        for raw in (
+            str(self._cfg_group("dm_umo", "") or "").strip(),
+            str(self._cfg("proactive.target_umo", "") or "").strip(),
+        ):
+            if not raw:
+                continue
+            fixed = self._canonical_umo(raw)
+            if fixed and not self._is_group(fixed):
+                return fixed
+        last = str(self.state.get("last_owner_dm_umo") or "").strip()
+        if last and self._valid_umo(last) and not self._is_group(last):
+            return last
+        ids = sorted(self._owner_ids())
+        if len(ids) != 1:
+            return ""
+        base = hint_umo or str(self.state.get("umo") or "")
+        if not self._valid_umo(base):
+            return ""
+        platform = base.split(":", 1)[0].strip()
+        if not platform:
+            return ""
+        return f"{platform}:FriendMessage:{ids[0]}"
+
+    def _proactive_pick_target(self) -> str:
+        """这一轮主动说话发群还是发他私聊。
+
+        群友模式原本"只发群"；`group_mode.dm_ratio` > 0 时按比例把一部分
+        主动消息改发到鱼主私聊。找不到私聊会话（没配 owner_ids、或多个人分不清）
+        就回落到群里——不猜、不群发。
+        """
+        if bool(self._cfg_group("enabled", False)):
+            # target_umo 填的是私聊：它就是这个模式下唯一的私聊目标，没有群可
+            # 回落，比例没有意义——直接用它。否则 ratio<1 时另一半会走
+            # `_proactive_target`，被"群友模式只能发群"挡掉，白空转 + 刷警告。
+            fixed = self._canonical_umo(
+                str(self._cfg("proactive.target_umo", "") or "").strip()
+            )
+            if fixed and not self._is_group(fixed):
+                return fixed
+            try:
+                ratio = float(self._cfg_group("dm_ratio", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                ratio = 0.0
+            ratio = max(0.0, min(1.0, ratio))
+            if ratio > 0 and (ratio >= 1.0 or random.random() < ratio):
+                dm = self._owner_dm_umo()
+                if dm:
+                    return dm
+                self._dbg("群友模式想私聊他，但没有可用的私聊会话，回落到群里")
+        return self._proactive_target()
+
     def _proactive_target(self) -> str:
         """主动说话发到哪；UMO 必须是 platform:MessageType:session_id。
 
         群友模式：**只发群，绝不发私聊**——目标会话填的是群就用它，否则用最近
         活跃的群会话；还没有任何群消息时返回空（宁可不发，也不去私聊）。
+        想让她偶尔私聊鱼主：用 `group_mode.dm_ratio`，那一步在
+        `_proactive_pick_target` 里先判，判中了就不会走到这里。
         普通模式：target_umo 优先、否则最近会话。
         目标格式不对时直接跳过并写清楚原因，不把裸 QQ 号/群号丢给
         `Context.send_message` 去触发“不合法 session 字符串”。
@@ -3787,7 +4224,7 @@ class EmotionCore(Star):
         st = self.state
         target = str(self._cfg("proactive.target_umo", "") or "").strip()
         last = str(st.get("umo") or "").strip()
-        group_mode = bool(self._cfg("perception.group_everyone", False))
+        group_mode = bool(self._cfg_group("enabled", False))
 
         if target:
             fixed = self._canonical_umo(target)
@@ -3818,7 +4255,42 @@ class EmotionCore(Star):
             return ""
         return last
 
-    async def _maybe_proactive(self, catch_up: bool = False) -> None:
+    def _guarantee_due(self, now: datetime | None = None) -> bool:
+        """睡前兜底：开关开着、今天还没主动开口、且已经到睡前 30 分钟内。
+
+        只回答"该不该试一次"，不判断能不能发——睡着/回避/刚聊过/目标没配
+        这些仍然由 `_maybe_proactive` 照常挡住。
+        """
+        if not bool(self._cfg("proactive.daily_guarantee", False)):
+            return False
+        if not self._cfg("enabled", True) or not self._cfg("proactive.enabled", True):
+            return False
+        st = self.state
+        if (
+            st.get("proactive_day") == now_day()
+            and int(st.get("proactive_count", 0)) > 0
+        ):
+            return False
+        now = now or datetime.now()
+        info = self._sleep_info(now)
+        if not info.get("enabled"):
+            # 没开作息就没有"睡前"这个点：当天第一次心跳就补
+            return True
+        if info.get("asleep"):
+            return False
+        if str(info.get("bedtime") or "") == str(info.get("wake") or ""):
+            return True
+        bedtime = parse_clock(str(info.get("bedtime") or ""))
+        if not bedtime:
+            return True
+        cur = now.hour * 60 + now.minute
+        bm = bedtime[0] * 60 + bedtime[1]
+        # 睡前 30 分钟内（跨零点也成立：00:10 睡，23:50 时差 20 分钟）
+        return (bm - cur) % 1440 <= 30
+
+    async def _maybe_proactive(
+        self, catch_up: bool = False, force_guarantee: bool = False
+    ) -> None:
         if not self._cfg("enabled", True):
             return
         if not self._cfg("proactive.enabled", True):
@@ -3826,7 +4298,8 @@ class EmotionCore(Star):
         if self._llm_busy:
             return
         st = self.state
-        umo = self._proactive_target()
+        group_mode = bool(self._cfg_group("enabled", False))
+        umo = self._proactive_pick_target()
         if not umo:
             self._dbg("没有可用会话，跳过主动说话")
             return
@@ -3842,9 +4315,13 @@ class EmotionCore(Star):
             self._dbg("她睡着了，暂停主动说话")
             return
 
-        # 冷却
+        # 冷却。睡前兜底是"今天还没说过"的补发，冷却不该把它拦掉；
+        # 但仍要求离上一条至少 10 分钟，避免跨零点时贴着上一句发。
         cooldown_h = float(self._cfg("proactive.cooldown_hours", 6.0))
-        if now - float(st.get("last_proactive", 0)) < cooldown_h * 3600:
+        cooldown_need = cooldown_h * 3600
+        if force_guarantee:
+            cooldown_need = min(cooldown_need, 600.0)
+        if now - float(st.get("last_proactive", 0)) < cooldown_need:
             return
         # 每日上限
         day = now_day()
@@ -3858,9 +4335,8 @@ class EmotionCore(Star):
         idle_min = float(self._cfg("proactive.min_idle_minutes", 10))
         # 只按"私聊"算沉默：群里别人聊天不该推迟她私聊的主动。
         # 群友模式 + 目标是群：改按群里最近一次说话算（否则纯群聊会被永远判"刚聊过"）。
-        if self._is_group(umo) and bool(
-            self._cfg("perception.group_everyone", False)
-        ):
+        # 目标是私聊他（group_mode.dm_ratio 命中）时仍按私聊时间算，口径一致。
+        if self._is_group(umo) and group_mode:
             last_active = max(
                 float(st.get("last_private_msg", 0.0) or 0.0),
                 float(st.get("last_owner_group_msg", 0.0) or 0.0),
@@ -3872,7 +4348,14 @@ class EmotionCore(Star):
         if now - last_active < idle_min * 60:
             return
         kind, prob = self._proactive_kind()
-        if not catch_up and random.random() >= prob:
+        if force_guarantee:
+            # 保底跳过随机，但仍受冷却/日限/刚聊过/作息/回避约束。
+            # 一晚最多每 10 分钟试一次：生成或发送失败时不至于每 30 秒重来。
+            if now - float(st.get("last_guarantee_ts", 0.0) or 0.0) < 600:
+                return
+            st["last_guarantee_ts"] = now
+            logger.info("[鱼的心] 睡前兜底：今天还没开口，补一条")
+        elif not catch_up and random.random() >= prob:
             self._dbg("主动说话未命中概率（%s p=%.2f）", kind, prob)
             return
 
@@ -3882,6 +4365,16 @@ class EmotionCore(Star):
             if not text:
                 return
             ok = await self._send_text(umo, text)
+            if not ok and group_mode and not self._is_group(umo):
+                # 私聊发不出去（机器人没加他好友 / 平台不认这个 FriendMessage），
+                # 不能把这一轮直接丢掉：回落到群里说，至少不白跑一次生成。
+                fallback = self._proactive_target()
+                if fallback and fallback != umo:
+                    logger.warning(
+                        "[鱼的心] 主动私聊发送失败（%s），改发到群：%r", umo, fallback
+                    )
+                    umo = fallback
+                    ok = await self._send_text(umo, text)
             if ok:
                 st["last_proactive"] = time.time()
                 st["last_proactive_text"] = text[:120]
@@ -5025,9 +5518,13 @@ class EmotionCore(Star):
         routes = [
             ("/<plugin>/state", self._web_state, ["GET"], "鱼的心：状态快照"),
             ("/<plugin>/tick", self._web_tick, ["POST"], "鱼的心：手动跳一次心跳"),
+            ("/<plugin>/guarantee", self._web_guarantee, ["POST"],
+             "鱼的心：开关睡前兜底"),
             # 别名：pluginName 恰好是 fish_heart 时的兜底
             ("/fish_heart/state", self._web_state, ["GET"], "鱼的心：状态快照（别名）"),
             ("/fish_heart/tick", self._web_tick, ["POST"], "鱼的心：手动心跳（别名）"),
+            ("/fish_heart/guarantee", self._web_guarantee, ["POST"],
+             "鱼的心：开关睡前兜底（别名）"),
         ]
         try:
             for route, handler, methods, desc in routes:
@@ -5039,7 +5536,7 @@ class EmotionCore(Star):
             self.state["web_api_ready"] = True
             self.state["web_api_at"] = time.time()
             self._save_state()
-            logger.info("[鱼的心] Web 页面接口已注册：state / tick（含通配与别名共 %d 条）", len(routes))
+            logger.info("[鱼的心] Web 页面接口已注册：state / tick / guarantee（含通配与别名共 %d 条）", len(routes))
 
     def _state_payload(self) -> dict:
         """把内部状态整理成页面用的 JSON。"""
@@ -5133,10 +5630,16 @@ class EmotionCore(Star):
             if isinstance(r, dict)
         ]
         sleep = self._sleep_info()
+        pf_level, pf_count = self._praise_fatigue_state("owner")
         return {
             "version": st.get("version"),
             "plugin_version": VERSION,
             "now": now_ts,
+            "praise_fatigue": {
+                "level": pf_level,
+                "count": pf_count,
+                "window_seconds": PRAISE_FATIGUE_WINDOW_SEC,
+            },
             "umo": str(st.get("umo") or ""),
             "mode": mode,
             "mode_cn": MODE_CN.get(mode, ""),
@@ -5226,22 +5729,26 @@ class EmotionCore(Star):
                 "cooldown_hours": float(self._cfg("proactive.cooldown_hours", 6.0)),
                 "daily_limit": int(self._cfg("proactive.daily_limit", 4)),
                 "min_idle_minutes": float(self._cfg("proactive.min_idle_minutes", 10)),
+                "daily_guarantee": bool(
+                    self._cfg("proactive.daily_guarantee", False)
+                ),
                 "target_umo": str(self._cfg("proactive.target_umo", "")),
                 "segment_reply": bool(self._cfg("proactive.segment_reply", True)),
                 "company": bool(self._cfg("proactive.company", True)),
                 "deep": bool(self._cfg("proactive.deep", True)),
-                "group_everyone": bool(
-                    self._cfg("perception.group_everyone", False)
+                "group_everyone": bool(self._cfg_group("enabled", False)),
+                "praise_fatigue": bool(
+                    self._cfg("perception.praise_fatigue", True)
                 ),
-                "group_scale": float(self._cfg("perception.group_scale", 0.5)),
+                "group_scale": float(self._cfg_group("member_scale", 0.5)),
                 "group_owner_scale": float(
-                    self._cfg("perception.group_owner_scale", 1.0)
+                    self._cfg_group("owner_scale", 1.0)
                 ),
                 "group_negative_scale": float(
-                    self._cfg("perception.group_negative_scale", 0.35)
+                    self._cfg_group("member_negative_scale", 0.35)
                 ),
                 "group_owner_negative_scale": float(
-                    self._cfg("perception.group_owner_negative_scale", 0.5)
+                    self._cfg_group("owner_negative_scale", 0.5)
                 ),
                 "thought_min_weight": float(self._cfg("thought.min_weight", 0.2)),
                 "thought_push": float(self._cfg("thought.proactive_push", 0.15)),
@@ -5328,6 +5835,21 @@ class EmotionCore(Star):
             return {"ok": True, "data": payload}
         except Exception as e:
             logger.warning("[鱼的心] 页面手动心跳失败: %s", e)
+            return {"ok": False, "error": str(e), "data": {}}
+
+    async def _web_guarantee(self, **kwargs) -> dict:
+        """面板开关：睡前兜底。不带参数就是取反，方便只做一次点击。"""
+        try:
+            cur = bool(self._cfg("proactive.daily_guarantee", False))
+            want = kwargs.get("enabled")
+            new = (not cur) if want is None else bool(want)
+            self._cfg_set_path("proactive.daily_guarantee", new)
+            saved = self._cfg_save()
+            payload = self._state_payload()
+            payload["guarantee_saved"] = saved
+            return {"ok": True, "data": payload, "enabled": new, "saved": saved}
+        except Exception as e:
+            logger.warning("[鱼的心] 页面切换睡前兜底失败: %s", e)
             return {"ok": False, "error": str(e), "data": {}}
 
     # ---------------- 命令 ----------------
@@ -5504,7 +6026,11 @@ class EmotionCore(Star):
             return
         if arg == "on":
             self._cfg_set("enabled", True)
-            yield event.plain_result("已开启鱼的心（本次运行有效）。")
+            started = self._ensure_loop()
+            yield event.plain_result(
+                "已开启鱼的心（本次运行有效）。"
+                + ("心跳已重新启动。" if started else "心跳仍在运行。")
+            )
             return
         if arg == "umo":
             shape = "格式正确" if self._valid_umo(umo) else "格式异常，应为 platform:MessageType:session_id"
@@ -5538,6 +6064,12 @@ class EmotionCore(Star):
             f"期待 {float(st.get('expectation', 0)):.0f}｜{repair_label} "
             f"{int(st.get(repair_key, 0))}",
         ]
+        pf_level, pf_count = self._praise_fatigue_state("owner")
+        if pf_level:
+            lines.append(
+                f"夸奖：最近 {PRAISE_FATIGUE_WINDOW_SEC // 60} 分钟 {pf_count} 次"
+                f"（{'夸过头了' if pf_level >= 2 else '听腻了'}）"
+            )
         if mode == MODE_CALM:
             lines.append(
                 "说明：“日常”= 没在生气（责怪 <25）；心情由九维决定，"
@@ -5649,6 +6181,39 @@ class EmotionCore(Star):
                 self.cfg[key] = value
         except Exception:
             pass
+
+    def _cfg_set_path(self, path: str, value: Any) -> bool:
+        """按 `a.b.c` 写进嵌套配置（面板开关用）；缺的中间层会补出来。"""
+        if not isinstance(self.cfg, dict):
+            return False
+        parts = [p for p in str(path or "").split(".") if p]
+        if not parts:
+            return False
+        cur: Any = self.cfg
+        for part in parts[:-1]:
+            nxt = cur.get(part) if isinstance(cur, dict) else None
+            if not isinstance(nxt, dict):
+                if not isinstance(cur, dict):
+                    return False
+                nxt = {}
+                cur[part] = nxt
+            cur = nxt
+        if not isinstance(cur, dict):
+            return False
+        cur[parts[-1]] = value
+        return True
+
+    def _cfg_save(self) -> bool:
+        """把配置写回磁盘；测试 / 普通 dict 没有 save_config 就只内存生效。"""
+        save = getattr(self.cfg, "save_config", None)
+        if not callable(save):
+            return False
+        try:
+            save()
+            return True
+        except Exception as e:
+            logger.warning("[鱼的心] 配置写盘失败（本次运行仍生效）: %s", e)
+            return False
 
     @staticmethod
     def _umo_of(event: AstrMessageEvent) -> str:
