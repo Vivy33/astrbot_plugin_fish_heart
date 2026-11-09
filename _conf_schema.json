@@ -270,9 +270,9 @@
     "items": {
       "enabled": {
         "type": "bool",
-        "description": "把心境写进系统提示词",
+        "description": "把心境写进本轮请求",
         "default": true,
-        "hint": "固定最后执行，只追加到末尾，不覆盖记忆插件与 TTS 的内容。"
+        "hint": "固定最后执行，只追加到本轮用户消息末尾，不覆盖记忆插件与 TTS 的内容，也不会打断前缀缓存。"
       },
       "min_gap_minutes": {
         "type": "int",
@@ -327,6 +327,13 @@
         "hint": "填 0 = 长期有效，直到 /adult off。默认 24 小时；到期后可以重新 /adult on，也可以在当前场景直接明确同意，不是只能靠命令。",
         "invisible": true
       },
+      "adult_mode_doc": {
+        "type": "string",
+        "description": "成人模式写法文件",
+        "default": "",
+        "hint": "留空用插件自带的 adult_mode_spec.md（蒸馏版，约 160 字）；也可以填绝对路径，或相对插件目录的路径。欲到 60 后，对话里的明确同意或发 /adult on，打开的那一轮会把这段写法约束注入一次：只挂在本轮用户消息末尾（mark_as_temp），不改 system prompt、不回存历史，人设和当前场景不受影响。",
+        "invisible": true
+      },
       "scene_consent_minutes": {
         "type": "float",
         "description": "自然语言场景同意有效期（分钟）",
@@ -343,9 +350,9 @@
       },
       "inject_interval_minutes": {
         "type": "float",
-        "description": "欲主动提示的注入间隔（分钟）",
-        "default": 5.0,
-        "hint": "正常聊天里每隔这么久最多注入一次欲的主动提示；主动消息不受此限制。填 0 = 每轮都注入。",
+        "description": "欲主动提示的刷新上限（分钟）",
+        "default": 30.0,
+        "hint": "状态没变时最多隔这么久刷新一次；欲档位（30/60）、成人层是否允许、是否暂停一变就立即注入，不受这个上限限制。主动消息每次注入。填 0 = 每轮都注入。",
         "invisible": true
       },
       "peak_hold_hours": {

@@ -36,6 +36,14 @@ from astrbot.api.star import Context, Star, register
 from astrbot.core.message.message_event_result import MessageChain
 from astrbot.core.star.star_tools import StarTools
 
+try:
+    # 把逐轮变化的注记挂到本轮用户消息末尾，而不是改 system_prompt：
+    # DeepSeek 等前缀缓存按"从开头到第一个变化点"命中，system_prompt 在最前面，
+    # 每轮一变后面的整段历史都要重算。旧版 AstrBot 没有这个类时退回原行为。
+    from astrbot.core.agent.message import TextPart
+except Exception:  # pragma: no cover - 兼容旧版 / 测试桩
+    TextPart = None  # type: ignore
+
 # 念头引擎：同目录独立文件（市场更新会覆盖 main.py，但引擎与状态会留下，重接几行即可）
 def _load_thought_engine():
     try:
@@ -108,7 +116,7 @@ def _thought_summary(thoughts: list) -> list:
 
 
 PLUGIN_NAME = "astrbot_plugin_fish_heart"
-VERSION = "0.3.9"
+VERSION = "0.4.0"
 
 # 注入钩子优先级：AstrBot 按优先级 **降序** 执行。
 # 天使之心 = 40，TTS = 0，这里用 -10 表示最后一个执行（只追加、不覆盖）。
@@ -922,8 +930,33 @@ ADULT_SOFT_EXIT = (
     "睡觉吧", "先睡吧", "睡了", "晚安", "休息吧", "够了", "不继续了",
     "停在这里", "我困了", "困了",
 )
+# 0.4.0：更像恋人说话的自然邀请。只在身体层硬条件全成立（欲≥60、关系满格、
+# 日常、不累、醒着、当前私聊）时才当“打开”，不需要“打开成人模式”这种口令。
+# 词取得长一点：“去床上躺会儿”“一起睡午觉”“别忍了，想哭就哭”都不算邀请。
+ADULT_NATURAL_INVITE = (
+    "今晚别走", "今晚别回去", "别走了", "留下来陪我", "陪我睡",
+    "今晚一起睡", "一起睡吧", "过来陪我", "去床上等我", "到床上去",
+    "抱我去床上", "今晚不睡了", "你别忍了",
+    "想要你", "想抱你", "想亲你",
+)
+
+# 邀请前的否定：整句里有这些就不算邀请。用精确短语，不用模糊正则——
+# 否则“我忍不住想要你”会被 (不|没).{0,4} 误杀。
+ADULT_INVITE_NEGATION = (
+    "不想要你", "不太想要你", "没想要你", "不想抱你", "没想抱你",
+    "不想亲你", "没想亲你", "不想让你", "不要你",
+)
+
 # 弱肯定窗口只对明确成人语境打开；“抱抱可以吗”这种普通亲近不算。
 ADULT_CONTEXT_RE = re.compile(r"继续|亲|想要|碰|贴|身体|留下|别走")
+
+# 0.4.0 成人模式：欲到 DESIRE_ADULT_AT（60）后才允许。没有“开关口令”：
+# 私聊里的话（“我想要你/别停”这类，或 /adult on）把身体层打开的那一轮，
+# 把写法约束（adult_mode_spec.md，蒸馏版）注入一次——只挂在本轮用户消息
+# 末尾、标 mark_as_temp，不进 system_prompt、不回存历史，人设和场景不受影响。
+ADULT_MODE_DOC_FILE = "adult_mode_spec.md"
+# 蒸馏版约 160 字；上限放宽，防止配置指到日志之类的超大文件。
+ADULT_MODE_DOC_MAX_CHARS = 60000
 # 主动说话的五型
 KIND_LONGING = "longing"
 KIND_WAITING = "waiting"
@@ -944,7 +977,7 @@ KIND_CN = {
 KIND_DESC = {
     KIND_LONGING: "你很想他，忍不住先开口。直接说想他，或者问一句他今天怎么样；只有记录里真的有你刚做的小事，才可以带一句，没写就别编。不要用「忙不忙」开场",
     KIND_WAITING: "你等了很久，想知道他还在不在。先看记录里他最后说了什么，能接就接；没有可接的就直接问他今天怎么样/在干嘛。不要为了开场编「刚收拾完/刚看到什么」，也别问忙不忙",
-    KIND_WHIM: "你突然想起一件小事，想跟他说一句。只说心里真的冒出来的那点，别编具体刚发生的事，也别硬找话题",
+    KIND_WHIM: "你想起一件小事，想跟他说一句。只说心里真的冒出来的那点，别编具体刚发生的事，也别硬找话题",
     KIND_COMPANY: (
         "你想让他放下手里的事陪你一会儿，但不许指责他，也不许把这句说成要求。"
         "可以软一点，像是在邀请，不是在讨；别用「有空吗」开场"
@@ -965,11 +998,11 @@ KIND_DESC = {
 # 也刻意不收"在忙吗/有空吗"——这类开场太像查岗，而且会连续重复。
 FALLBACK_LINES = {
     # 兜底台词也不能编具体近况：只留“任何时间都成立”的关系型开场。
-    KIND_LONGING: ("突然有点想你", "你那边今天怎么样", "想跟你说句话",
-                   "突然想到你了"),
+    KIND_LONGING: ("想你了", "你那边今天怎么样", "想跟你说句话",
+                   "有点想你"),
     KIND_WAITING: ("今天过得怎么样", "在干嘛呀",
-                   "你那边还好吗", "突然想到你了"),
-    KIND_WHIM: ("突然想到你了", "没什么事，就是想说一句",
+                   "你那边还好吗", "想到你了"),
+    KIND_WHIM: ("想到你了", "没什么事，就是想说一句",
                 "今天过得怎么样", "在干嘛呀"),
     KIND_COMPANY: ("陪我说会儿话吧", "我一个人有点闷", "想跟你说说话"),
     KIND_DEEP: (
@@ -999,6 +1032,23 @@ _KW_SLEEP = re.compile(r"晚安|我睡了|去睡了|睡觉了|先睡|睡啦|去�
 _KW_BUSY = re.compile(r"在忙|加班|开会|没空|忙完再说|晚点说")
 _KW_ASK_AFTER_SLEEP = re.compile(
     r"在干嘛|还没睡|睡了吗|今天过得怎么样|今天怎么样|忙不忙|有空吗|醒了吗|在吗"
+)
+# 他刚说过话（默认一小时内）就算醒着：主动开口不问他睡没睡/醒没醒，也不劝睡。
+# 夜里她劝完睡、他其实醒着又聊了几句，最容易被误判成"还没醒"，所以这一条
+# 只看"他最近有没有说话"，不靠模型从"深夜"两个字去猜。
+AWAKE_WINDOW_MINUTES = 60.0
+# 他说“要睡/晚安”之后多久内不再问“睡了吗/在干嘛/今天怎么样”。
+# 12 小时会把第二天早上也罩进去——他昨晚说了晚安，早上问“今天怎么样”
+# 本来是对的，却会被自检打回；隔了一夜就算新的一天。
+SLEEP_ASK_WINDOW_HOURS = 6.0
+_SLEEP_TOPIC_AT_HIM = re.compile(
+    r"睡了吗|睡了没|睡没睡|睡着了吗|睡着没|还没睡|还不睡|不睡|在睡吗|"
+    r"是不是睡了|该睡|早点睡|快去睡|去睡|睡觉吧|睡吧|睡觉去|睡会儿|睡一会|"
+    r"别熬|熬夜|早点休息|该休息|快休息|去休息|休息吧|"
+    r"闭眼|眯一会|眯一会儿|再睡会|再睡一会|睡个回笼觉|"
+    r"睡醒|醒了吗|醒了没|还没醒|没醒|醒着吗|是不是还醒|"
+    r"等你醒|醒了再聊|醒了再说|睡醒再聊|起床|起来了吗|起了吗|"
+    r"晚安|好梦"
 )
 
 # v3：私聊/群聊分开记时间戳
@@ -1078,6 +1128,8 @@ def new_state() -> dict:
         # 0.3.6 一次性配置迁移标记：旧 0.3.5 的 group_negative_scale=0.8
         # 只在第一次启动时改成 0.35；之后用户手动改回 0.8 会尊重。
         "config_036_migrated": False,
+        # 0.4.0：欲的注入从固定 5/10 分钟改成“状态签名 + 刷新上限”
+        "desire_refresh_30_migrated": False,
         "drives": dict(BASELINE),
         "expectation": 0.0,
         "blame_pressure": 0.0,
@@ -1089,6 +1141,8 @@ def new_state() -> dict:
         "desire_ever_awakened": False,
         "desire_unlock_since": 0.0,
         "last_desire_inject": 0.0,
+        # 上次注入时的状态签名：档位/成人层/暂停一变就立即重注
+        "last_desire_sig": "",
         "desire_peak_until": 0.0,
         "desire_log": [],
         # 成人向：总开关在配置；这里是私聊鱼主的同意状态。
@@ -1098,6 +1152,11 @@ def new_state() -> dict:
         "adult_ask_until": 0.0,
         "adult_paused": False,
         "adult_paused_reason": "",
+        # 0.4.0 成人模式：写法只在“身体层第一次允许的那一轮”注入一次；
+        # 离开身体层（暂停/收尾/条件失效）时清掉，下次再进来重新注。
+        "adult_doc_scene_done": False,
+        "adult_mode_opened_ts": 0.0,
+        "adult_mode_doc_ts": 0.0,
         "last_tick": time.time(),
         "last_injection": 0.0,
         "last_injection_mode": "",
@@ -1231,6 +1290,11 @@ class EmotionCore(Star):
         self._unknown_sender_logged: set[str] = set()
         self._last_outsider_save = 0.0
         self._history_lock: asyncio.Lock | None = None
+        # 成人模式写法约束：首次用时读盘，之后缓存；空串表示没找到。
+        self._adult_doc_cache: str | None = None
+        self._adult_doc_missing_logged = False
+        # 文件缺失时 60 秒后再查，避免每个请求都 stat 三个路径
+        self._adult_doc_retry_ts = 0.0
 
         try:
             data_dir = str(StarTools.get_data_dir(PLUGIN_NAME))
@@ -1243,6 +1307,7 @@ class EmotionCore(Star):
         self.state = self._load_state()
         self._migrate_config_036()
         self._migrate_group_mode()
+        self._migrate_desire_refresh()
         # 成人向总开关关闭时，不保留任何旧的“同意”状态；重新打开也不会
         # 恢复上一次的授权。欲本身可以继续隐藏积累，但身体层永远进不去。
         if not self._adult_enabled():
@@ -1252,6 +1317,7 @@ class EmotionCore(Star):
             self.state["adult_ask_until"] = 0.0
             self.state["adult_paused"] = False
             self.state["adult_paused_reason"] = ""
+            self.state["adult_doc_scene_done"] = False
         if not bool(self._cfg("desire.enabled", True)):
             # 关掉隐藏属性时，不只是停止增长：旧解锁/同意也不该在
             # 重新打开后突然复活。
@@ -1259,12 +1325,14 @@ class EmotionCore(Star):
             self.state["desire_awakened"] = False
             self.state["desire_unlock_since"] = 0.0
             self.state["last_desire_inject"] = 0.0
+            self.state["last_desire_sig"] = ""
             self.state["adult_consent_until"] = 0.0
             self.state["adult_consent_standing"] = False
             self.state["adult_scene_consent_until"] = 0.0
             self.state["adult_ask_until"] = 0.0
             self.state["adult_paused"] = False
             self.state["adult_paused_reason"] = ""
+            self.state["adult_doc_scene_done"] = False
 
         logger.info(
             "[鱼的心] 已载入 v%s，状态=%s，数据目录=%s",
@@ -1390,6 +1458,45 @@ class EmotionCore(Star):
         logger.info(
             "[鱼的心] 群友模式配置已合并到 group_mode：%s",
             "、".join(sorted(moved)),
+        )
+
+    def _migrate_desire_refresh(self) -> None:
+        """0.4.0：欲的注入从固定 5/10 分钟改成“状态签名 + 刷新上限 30 分钟”。
+
+        只迁旧默认 5 / 10；手改成 0 / 3 / 20 等值的不动。
+        和 _migrate_config_036 一样，只处理带 save_config 的 AstrBotConfig；
+        写盘失败不写标记，下次启动重试。
+        """
+        if self.state.get("desire_refresh_30_migrated"):
+            return
+        save = getattr(self.cfg, "save_config", None)
+        if not callable(save):
+            return
+        desire = self.cfg.get("desire") if isinstance(self.cfg, dict) else None
+        if not isinstance(desire, dict) or "inject_interval_minutes" not in desire:
+            self.state["desire_refresh_30_migrated"] = True
+            self._save_state()
+            return
+        try:
+            cur = float(desire.get("inject_interval_minutes"))
+        except (TypeError, ValueError):
+            cur = 30.0
+        if cur not in (5.0, 10.0):
+            self.state["desire_refresh_30_migrated"] = True
+            self._save_state()
+            return
+        desire["inject_interval_minutes"] = 30
+        try:
+            save()
+        except Exception as e:
+            logger.warning(
+                "[鱼的心] 欲注入间隔迁移写盘失败，下次启动重试: %s", e
+            )
+            return
+        self.state["desire_refresh_30_migrated"] = True
+        self._save_state()
+        logger.info(
+            "[鱼的心] 0.4.0 迁移：desire.inject_interval_minutes 5/10 → 30（刷新上限）"
         )
 
     def _dbg(self, msg: str, *args) -> None:
@@ -1614,6 +1721,7 @@ class EmotionCore(Star):
         st["adult_ask_until"] = 0.0
         st["adult_paused"] = False
         st["adult_paused_reason"] = ""
+        st["adult_doc_scene_done"] = False
 
     def _clear_desire_state(self) -> None:
         st = self.state
@@ -1621,6 +1729,7 @@ class EmotionCore(Star):
         st["desire_awakened"] = False
         st["desire_unlock_since"] = 0.0
         st["last_desire_inject"] = 0.0
+        st["last_desire_sig"] = ""
         st["desire_peak_until"] = 0.0
         st["desire_log"] = []
         self._clear_adult_consent()
@@ -1703,7 +1812,7 @@ class EmotionCore(Star):
         if self._adult_scene_active():
             return "成人层：场景中"
         if self._adult_consent_active():
-            return "成人层：已预授权"
+            return "成人层：已打开"
         return "成人层：未同意"
 
     def _adult_consent_active(self) -> bool:
@@ -1723,8 +1832,12 @@ class EmotionCore(Star):
             self.state.get("adult_scene_consent_until", 0.0) or 0.0
         ) > time.time()
 
-    def _adult_layer_allowed(self, umo: str = "") -> bool:
-        """身体层是否允许参与：总开关、欲、同意、场景、状态六道闸。"""
+    def _adult_body_ready(self, umo: str = "") -> bool:
+        """身体层除“同意”之外的硬条件：欲≥60、关系满格、日常、不累、醒着。
+
+        0.4.0 拆出来给成人模式用：打开的那一刻只要这些条件成立，就当“模式
+        真的可以用了”，规范才值得注入；只有同意票、欲还没到 60 时不注入。
+        """
         if not self._adult_enabled():
             self._clear_adult_consent()
             return False
@@ -1745,8 +1858,6 @@ class EmotionCore(Star):
             return False
         if st.get("adult_paused"):
             return False
-        if not (self._adult_consent_active() or self._adult_scene_active()):
-            return False
         # 不只是生气/害怕/回避：委屈时也不进身体层。
         if mode_of(float(st.get("blame_pressure", 0.0))) != MODE_CALM:
             return False
@@ -1759,6 +1870,98 @@ class EmotionCore(Star):
         if self._sleep_info(datetime.now()).get("asleep"):
             return False
         return True
+
+    def _adult_layer_allowed(self, umo: str = "") -> bool:
+        """身体层是否允许参与：硬条件全过，并且同意/场景还在有效期内。"""
+        if not self._adult_body_ready(umo):
+            return False
+        return bool(self._adult_consent_active() or self._adult_scene_active())
+
+    def _open_adult_mode(self, source: str = "命令") -> str:
+        """打开成人模式：记长期同意，返回有效期文案。
+
+        0.4.0 起，没有“开关口令”：对话里的明确同意和 /adult on 走同一条路。
+        注入由 _maybe_inject_adult_mode_doc 按“身体层第一次允许”触发：
+        语言打开当轮就注入，命令打开则等下一轮消息。
+        """
+        hours = max(
+            0.0,
+            float(self._cfg("desire.adult_consent_hours", 24.0) or 0.0),
+        )
+        st = self.state
+        st["adult_paused"] = False
+        st["adult_paused_reason"] = ""
+        st["adult_scene_consent_until"] = 0.0
+        st["adult_ask_until"] = 0.0
+        if hours <= 0:
+            st["adult_consent_standing"] = True
+            st["adult_consent_until"] = 0.0
+            until = "直到 /adult off"
+        else:
+            st["adult_consent_standing"] = False
+            st["adult_consent_until"] = time.time() + hours * 3600
+            until = (
+                f"{datetime.fromtimestamp(st['adult_consent_until']):%m-%d %H:%M}"
+            )
+        st["adult_mode_opened_ts"] = time.time()
+        logger.info("[鱼的心] 成人模式同意已记录（%s，%s）", source, until)
+        return until
+
+    def _close_adult_mode(self, source: str = "命令") -> None:
+        """关闭成人模式：撤掉同意票、场景和暂停标记，清掉场景标记。"""
+        st = self.state
+        st["adult_consent_until"] = 0.0
+        st["adult_consent_standing"] = False
+        st["adult_scene_consent_until"] = 0.0
+        st["adult_ask_until"] = 0.0
+        st["adult_paused"] = False
+        st["adult_paused_reason"] = ""
+        st["adult_doc_scene_done"] = False
+        logger.info("[鱼的心] 成人模式已关闭（%s）", source)
+
+    def _adult_mode_doc(self) -> str:
+        """读成人模式写法约束：配置路径优先，其次随包的 adult_mode_spec.md。
+
+        只读一次并缓存；找不到时只 warning 一次，之后按“没有规范”处理，
+        不会每轮都刷日志。
+        """
+        if self._adult_doc_cache:
+            return self._adult_doc_cache
+        now = time.time()
+        if now < self._adult_doc_retry_ts:
+            return ""
+        plugin_dir = os.path.dirname(os.path.abspath(__file__))
+        name = str(self._cfg("desire.adult_mode_doc", "") or "").strip()
+        candidates: list[str] = []
+        if name:
+            candidates.append(
+                name if os.path.isabs(name) else os.path.join(plugin_dir, name)
+            )
+        candidates.append(os.path.join(plugin_dir, ADULT_MODE_DOC_FILE))
+        candidates.append(os.path.join(self.data_dir, ADULT_MODE_DOC_FILE))
+        for path in candidates:
+            try:
+                if not os.path.isfile(path):
+                    continue
+                with open(path, "r", encoding="utf-8") as f:
+                    text = f.read(ADULT_MODE_DOC_MAX_CHARS).strip()
+            except Exception as e:
+                logger.warning("[鱼的心] 成人模式规范读取失败 %s: %s", path, e)
+                continue
+            if text:
+                self._adult_doc_cache = text
+                self._adult_doc_retry_ts = 0.0
+                self._dbg("成人模式规范已载入：%s（%d 字）", path, len(text))
+                return self._adult_doc_cache
+        self._adult_doc_retry_ts = now + 60.0
+        if not self._adult_doc_missing_logged:
+            self._adult_doc_missing_logged = True
+            logger.warning(
+                "[鱼的心] 成人模式规范不存在（找过 %s）；成人模式仍可打开，"
+                "只是不注入规范。",
+                " / ".join(candidates),
+            )
+        return ""
 
     def _grant_adult_scene(self, source: str = "自然语言") -> None:
         minutes = max(
@@ -1809,30 +2012,30 @@ class EmotionCore(Star):
 
     def _update_adult_consent(
         self, event: AstrMessageEvent, text: str, umo: str
-    ) -> None:
+    ) -> bool:
         """从私聊鱼主的话里识别“明确同意/暂停”。
 
         只做确定性短语匹配：不猜语气、不猜欲、不把暧昧当同意；
         群聊/陌生人/未解锁/欲总开关关闭时完全不参与。
         """
         if not self._adult_enabled():
-            return
+            return False
         if not bool(self._cfg("desire.enabled", True)):
-            return
+            return False
         if not self._adult_owner_ok(event, umo):
-            return
+            return False
         st = self.state
         if not st.get("desire_awakened"):
-            return
+            return False
         if str(st.get("umo") or "").strip() != umo:
-            return
+            return False
         raw = re.sub(r"\s+", "", text or "")
         if not raw:
-            return
+            return False
 
         # “想不想/要不要/可不可以”是提问，不是同意，也不是暂停。
         if re.search(r"想不想|要不要|可不可以|能不能", raw):
-            return
+            return False
 
         # 先摘掉肯定短语和“不要紧/不用/没事”这类非暂停用法。
         probe = raw
@@ -1849,7 +2052,7 @@ class EmotionCore(Star):
 
         # “结束了吗”是在问，不是在喊停。
         if re.search(r"结束(?:了)?(?:吗|么|没有|[?？])", raw):
-            return
+            return False
 
         stop_hit = (
             any(p in probe for p in ADULT_STOP)
@@ -1865,7 +2068,7 @@ class EmotionCore(Star):
                 or st.get("adult_paused")
             ):
                 self._pause_adult("明确说了停/不要")
-            return
+            return False
 
         # 晚安/先这样/抱一会儿就好：当前场景已建立，或纯 /adult on 且
         # 成人层此刻确实可用时，都自然收尾；问句/否定由 _is_soft_exit 排除。
@@ -1873,17 +2076,29 @@ class EmotionCore(Star):
             self._adult_scene_active() or self._adult_layer_allowed(umo)
         ):
             self._soft_exit_adult()
-            return
+            return False
+
+        # 自然的邀请：只在身体层硬条件全成立时才算“打开”，不靠
+        # “打开成人模式”这种口令；问句不算，普通的“抱我”也不会被升级。
+        if (
+            not re.search(r"[?？]|吗", raw)
+            and not any(p in raw for p in ADULT_INVITE_NEGATION)
+            and any(p in raw for p in ADULT_NATURAL_INVITE)
+        ):
+            if self._adult_body_ready(umo):
+                self._grant_adult_scene("自然邀请")
+                return False
+            # 没到 60：不在这里拦，交给下面的强肯定处理
 
         if float(st.get("desire", 0.0) or 0.0) < 40.0:
-            return
+            return False
 
         # 强肯定：明确进入成人语境，可直接给场景同意；问句不算。
         if any(p in raw for p in ADULT_STRONG_YES) and not re.search(
             r"[?？]|吗", raw
         ):
             self._grant_adult_scene("自然语言肯定")
-            return
+            return False
 
         ask_until = float(st.get("adult_ask_until", 0.0) or 0.0)
         # “可以继续”和亲近邀请本身不够；要她刚问过，或当前场景已经建立。
@@ -1891,11 +2106,13 @@ class EmotionCore(Star):
             ask_until > time.time() or self._adult_scene_active()
         ):
             self._grant_adult_scene("场景内续接")
-            return
+            return False
 
         # 弱肯定：只有她刚问过，且整句就是“嗯/好/行/可以”才算。
         if ask_until > time.time() and raw.strip("。.!！~… ") in ADULT_WEAK_YES:
             self._grant_adult_scene("同意窗口内弱肯定")
+            return False
+        return False
 
     def _note_adult_desire(
         self, event: AstrMessageEvent, text: str, umo: str
@@ -2186,8 +2403,7 @@ class EmotionCore(Star):
             )
         block = self._build_injection(for_owner=False, umo=umo)
         if block:
-            req_sp = getattr(request, "system_prompt", "") or ""
-            setattr(request, "system_prompt", (req_sp.rstrip() + "\n\n" + block).strip())
+            self._attach_injection(request, block)
         # 群消息很密，落盘做 60 秒防抖：既不会写盘风暴，也不会让状态"看不见"
         now = time.time()
         if now - self._last_outsider_save >= 60.0:
@@ -2543,6 +2759,7 @@ class EmotionCore(Star):
             st["desire_awakened"] = False
             st["desire_unlock_since"] = 0.0
             st["desire"] = 0.0
+            st["last_desire_sig"] = ""
             st["desire_peak_until"] = 0.0
             st["adult_scene_consent_until"] = 0.0
             self._note_desire(-old_desire, "关系回落锁回")
@@ -3289,6 +3506,80 @@ class EmotionCore(Star):
 
     # ---------------- 钩子：LLM 请求前 ----------------
 
+    def _attach_injection(self, request, block: str) -> bool:
+        """把逐轮变化的注记挂到本轮用户消息末尾，而不是改 system_prompt。
+
+        DeepSeek 等前缀缓存按“从开头到第一个变化点”命中：System Prompt 在
+        请求最前面，只要它每轮都变，后面的整段历史都会按未命中重算（差价
+        约 10 倍）。挂到 `extra_user_content_parts`——它在历史之后、当前用户
+        消息里——前缀就不动了，只多末尾一小段。
+
+        `mark_as_temp()` 必须调用：否则 AstrBot 会把这些注记回存进对话历史，
+        下一轮变成真的历史消息、逐轮累积。旧版 AstrBot 没有这个字段时退回
+        原来的 system_prompt 行为。
+        """
+        body = (block or "").strip()
+        if not body:
+            return False
+        parts = getattr(request, "extra_user_content_parts", None)
+        if TextPart is not None and isinstance(parts, list):
+            try:
+                part = TextPart(text=body)
+                marked = part.mark_as_temp()
+                parts.append(marked if isinstance(marked, TextPart) else part)
+                return True
+            except Exception as e:
+                self._dbg("挂到用户消息失败，退回 system_prompt: %s", e)
+        try:
+            req_sp = getattr(request, "system_prompt", "") or ""
+            setattr(
+                request, "system_prompt", (req_sp.rstrip() + "\n\n" + body).strip()
+            )
+            return True
+        except Exception as e:
+            self._dbg("注入失败: %s", e)
+            return False
+
+    def _maybe_inject_adult_mode_doc(
+        self, request, umo: str
+    ) -> None:
+        """身体层第一次打开的那一轮，把写法约束注入一次。
+
+        没有“开关口令”：不管是对话里的明确同意，还是 /adult on，只要
+        `_adult_layer_allowed()` 由 false 变 true，这一轮就注入；同一个场景
+        只注一次（adult_doc_scene_done），离开身体层（暂停/收尾/条件失效）
+        才重置，下次再进来重新注。
+        """
+        st = self.state
+        if self._is_group(umo):
+            # 群里不注入：身体层本来就只在私聊鱼主生效。
+            return
+        if not self._cfg("inject.enabled", True):
+            # 注入总开关关着：尊重“只在打开那一轮”的语义，标记本场景已完成，
+            # 免得之后重新打开注入时在场景中途补注。
+            if self._adult_layer_allowed(umo):
+                st["adult_doc_scene_done"] = True
+            return
+        if not self._adult_layer_allowed(umo):
+            st["adult_doc_scene_done"] = False
+            return
+        if st.get("adult_doc_scene_done"):
+            return
+        spec = self._adult_mode_doc()
+        if not spec:
+            # 文件缺失：不标记完成，等文件补上后（60 秒节流）再试。
+            return
+        block = (
+            "【这轮怎么说话】下面是写法，不是台词；别念出来，也别提它。\n\n"
+            + spec
+            + "\n\n【回到场景】用她自己的口气接着说。"
+        )
+        if not self._attach_injection(request, block):
+            return
+        st["adult_doc_scene_done"] = True
+        st["adult_mode_doc_ts"] = time.time()
+        self._dbg("已注入成人模式写法（%d 字）", len(spec))
+
     @filter.on_llm_request(priority=INJECT_PRIORITY)
     async def on_llm_request(self, event: AstrMessageEvent, request) -> None:
         if not self._cfg("enabled", True):
@@ -3516,31 +3807,18 @@ class EmotionCore(Star):
                 umo=umo, force=asked, mode=turn_mode_after,
                 speaker_key=speaker_key,
             )
-            if block:
-                req_sp = getattr(request, "system_prompt", "") or ""
-                setattr(request, "system_prompt", (req_sp.rstrip() + "\n\n" + block).strip())
+            if block and self._attach_injection(request, block):
                 self._dbg("已注入心境: %s", block.replace("\n", " / "))
 
             # 欲不走心境节流：只要已解锁，正常聊天每轮都带一小段“主动一点”。
             desire_block = self._desire_injection(umo, proactive=False)
-            if desire_block:
-                req_sp = getattr(request, "system_prompt", "") or ""
-                setattr(
-                    request,
-                    "system_prompt",
-                    (req_sp.rstrip() + "\n\n" + desire_block).strip(),
-                )
+            if desire_block and self._attach_injection(request, desire_block):
                 self._dbg("已注入主动的欲: %s", desire_block.replace("\n", " / "))
 
             # 睡眠状态单独注入：它不受心境节流影响，睡着时每一轮都要让她知道
             sleep_block = self._sleep_injection(datetime.now())
             if sleep_block:
-                req_sp = getattr(request, "system_prompt", "") or ""
-                setattr(
-                    request,
-                    "system_prompt",
-                    (req_sp.rstrip() + "\n\n" + sleep_block).strip(),
-                )
+                self._attach_injection(request, sleep_block)
 
             # 她沉默那几条不会进 AstrBot 的对话历史（请求被终止了），
             # 所以在这里把"没接住的话"补给她，免得她真的失忆。
@@ -3552,13 +3830,12 @@ class EmotionCore(Star):
                 for extra in extras:
                     if not extra:
                         continue
-                    req_sp = getattr(request, "system_prompt", "") or ""
-                    setattr(
-                        request,
-                        "system_prompt",
-                        (req_sp.rstrip() + "\n\n" + extra).strip(),
-                    )
-                    self._dbg("补充上下文 %s 行", extra.count("\n") + 1)
+                    if self._attach_injection(request, extra):
+                        self._dbg("补充上下文 %s 行", extra.count("\n") + 1)
+
+            # 成人模式：打开的那一轮把写法约束注入一次（最后挂，附在本轮
+            # 用户消息末尾；不改 system_prompt，不打断前缀缓存）。
+            self._maybe_inject_adult_mode_doc(request, umo)
 
             self._save_state()
         except Exception as e:
@@ -3601,7 +3878,7 @@ class EmotionCore(Star):
             sig_changed = sig != perf.get("sig")
             pf_changed = pf_level != int(perf.get("pf") or 0)
             # 生气是行为开关，而且她每轮都可能在"对谁生气"之间切换：
-            # 不能像委屈/害怕那样同档静默——否则下一轮 system prompt 里
+            # 不能像委屈/害怕那样同档静默——否则下一轮请求里
             # 没有心境块，她会把上一轮的生气忘掉，按常态说话。
             if mode != MODE_ANGRY:
                 if not mode_changed and not pf_changed and not sig_changed:
@@ -3720,23 +3997,14 @@ class EmotionCore(Star):
                         _mark_induced(thoughts)
         return "\n".join(lines)
 
-    def _desire_injection(
-        self, umo: str, proactive: bool = False, force: bool = False
-    ) -> str:
-        """隐藏的欲：正常聊天和主动消息都要带的“主动”提示。
+    def _desire_sig(self, umo: str) -> str:
+        """欲注入的状态签名：变了就立刻重注，没变才走刷新上限。
 
-        不写数值，只写她此刻想不想主动靠近。正常聊天按
-        `desire.inject_interval_minutes`（默认 5 分钟）限频；主动消息
-        走 proactive=True，强制注入，语气更直接地鼓励她先开口。
+        只装“会改变那几句文案 / 该不该出现”的状态，不装数值本身：
+        档位（<30 / 30–59 / ≥60）、成人层是否允许、是否暂停 + 原因。
+        返回空串表示现在不该出现（没解锁 / 关系掉出满格 / 非日常 /
+        睡着 / 高压高疲 / 不是当前私聊）。
         """
-        if proactive:
-            force = True
-        if not self._cfg("inject.enabled", True):
-            return ""
-        if not bool(self._cfg("desire.enabled", True)):
-            return ""
-        if not umo or self._is_group(umo):
-            return ""
         st = self.state
         if str(st.get("umo") or "").strip() != umo:
             return ""
@@ -3748,7 +4016,6 @@ class EmotionCore(Star):
         if not self._desire_bond_full():
             return ""
         # 睡着、高压力、高疲惫时，连欲的主动提示也不出现。
-        # 成人层本来就有这几道闸，这里补的是“主动块”本身。
         if self._sleep_info(datetime.now()).get("asleep"):
             return ""
         drives = st.get("drives") or {}
@@ -3757,17 +4024,69 @@ class EmotionCore(Star):
             or float(drives.get("fatigue", 0.0) or 0.0) >= 65.0
         ):
             return ""
+        desire = float(st.get("desire", 0.0) or 0.0)
+        band = 2 if desire >= DESIRE_ADULT_AT else (1 if desire >= 30.0 else 0)
+        # 这里会顺带走到 _adult_layer_allowed 的清理（成人关掉时清 consent、
+        # 欲关掉时清状态），所以别把 _desire_sig 当成纯读函数——那些清理是
+        # 安全兜底，不能为了“纯读”拿掉。
+        adult = bool(self._adult_layer_allowed(umo)) if band >= 2 else False
+        paused = bool(st.get("adult_paused"))
+        reason = str(st.get("adult_paused_reason") or "")
+        return f"{band}|{int(adult)}|{int(paused)}|{reason}"
 
-        # 暂停/收尾是状态变化，不能被普通 5 分钟限频吞掉。
+    def _desire_injection(
+        self, umo: str, proactive: bool = False, force: bool = False,
+        commit: bool = True,
+    ) -> str:
+        """隐藏的欲：正常聊天和主动消息都要带的“主动”提示。
+
+        不写数值，只写她此刻想不想主动靠近。正常聊天按“状态签名”触发：
+        档位 / 成人层 / 暂停一变就立即注入；没变时最多每
+        `desire.inject_interval_minutes`（默认 30 分钟）刷新一次。主动消息
+        走 proactive=True，强制注入，语气更直接地鼓励她先开口。
+
+        `commit=False` 用于主动消息生成：只取提示、不写 `last_desire_*`；
+        生成/发送失败时不会把正常聊天的 30 分钟刷新提前消耗掉。
+        """
+        if proactive:
+            force = True
+        st = self.state
+        if not self._cfg("inject.enabled", True):
+            if commit:
+                st["last_desire_sig"] = ""
+            return ""
+        if not bool(self._cfg("desire.enabled", True)):
+            if commit:
+                st["last_desire_sig"] = ""
+            return ""
+        if not umo or self._is_group(umo):
+            return ""
+        sig = self._desire_sig(umo)
+        if not sig:
+            # 现在不该出现；把签名清空，条件恢复时会立即重注一次。
+            if commit:
+                st["last_desire_sig"] = ""
+            return ""
+        if sig != str(st.get("last_desire_sig") or ""):
+            force = True
+
+        # 暂停/收尾是安全边界，必须每轮都在，不能被刷新间隔吞掉。
         if st.get("adult_paused"):
             force = True
 
         now_ts = time.time()
         if not force:
-            interval_min = max(
-                0.0,
-                float(self._cfg("desire.inject_interval_minutes", 5.0) or 0.0),
-            )
+            try:
+                interval_min = max(
+                    0.0,
+                    float(
+                        self._cfg("desire.inject_interval_minutes", 30.0)
+                        or 0.0
+                    ),
+                )
+            except (TypeError, ValueError):
+                interval_min = 30.0
+                self._dbg("desire.inject_interval_minutes 非法，按 30 分钟处理")
             if interval_min > 0:
                 last = float(st.get("last_desire_inject", 0.0) or 0.0)
                 if now_ts - last < interval_min * 60:
@@ -3788,11 +4107,16 @@ class EmotionCore(Star):
                 )
             # 暂停/收尾时只给边界，不再给“主动靠近”的提示。
             out = "\n".join(lines)
-            st["last_desire_inject"] = now_ts
+            if commit:
+                st["last_desire_sig"] = sig
+                st["last_desire_inject"] = now_ts
             return out
         if desire < 30.0:
+            # 档位 0 没有正文；记下签名，跨到 30 时才会立即重注。
+            if commit:
+                st["last_desire_sig"] = sig
             out = "\n".join(lines)
-            if out:
+            if commit and out:
                 st["last_desire_inject"] = now_ts
             return out
 
@@ -3829,7 +4153,8 @@ class EmotionCore(Star):
             else:
                 lines.append("你心里有一点想他，可以比平时主动一点；别每句都提。")
         out = "\n".join(lines)
-        if out:
+        if commit and out:
+            st["last_desire_sig"] = sig
             st["last_desire_inject"] = now_ts
         return out
 
@@ -4716,9 +5041,20 @@ class EmotionCore(Star):
         return max(0.0, (time.time() - ts) / 3600.0)
 
     def _proactive_direction(
-        self, kind: str, drives: dict, exp: float, now: datetime | None = None
+        self,
+        kind: str,
+        drives: dict,
+        exp: float,
+        now: datetime | None = None,
+        owner_awake: bool = False,
     ) -> str:
-        """这次主动开口该往哪个方向说：按时段 + 依恋/期待换一种，不再固定问忙不忙。"""
+        """这次主动开口该往哪个方向说：按依恋/期待换一种，不再固定问忙不忙。
+
+        `owner_awake` 表示主人一小时内说过话（还醒着），这时直接接他最后那句。
+        不再按“早上/下午/晚上/深夜”列示例开头：示例是正向指令，模型会照抄，
+        “晚上到家了吗”“早上醒了吗”就是这么来的。没醒着时也只让她看他最后
+        一句透露的状态，隔了一夜就当新的一天。
+        """
         now = now or datetime.now()
         part = self._daypart(now)
         if kind == KIND_ANGRY:
@@ -4753,21 +5089,35 @@ class EmotionCore(Star):
             if exp >= 60:
                 core = "你等得有点久了，可以直接说想他，或者问他今天怎么样；别问忙不忙"
             elif att >= 70:
-                core = "撒个娇：说刚才突然想到他，或者想让他陪一会儿；别用「有空吗」开场"
+                core = "撒个娇：直接说想他了，或者想让他陪一会儿；别用「有空吗」开场"
             else:
                 core = (
                     "直接带一句想他，或者问他今天怎么样。"
                     "只有记录里明确写过你刚做了什么，才可以提那件事；"
                     "没写就只问不陈述，别编“刚看到什么/刚收拾完”"
                 )
-            return (
-                f"{core}。现在是{part}，选一个符合时段的开头"
-                "（早上醒了吗 / 下午在干嘛 / 晚上到家了吗 / 深夜还没睡吗）。"
-            )
+            if owner_awake:
+                tail = (
+                    "他刚说过话、人是醒着的，直接接他最后那句往下说；"
+                    "别问「还没睡吗 / 醒了吗」，也别劝他睡。"
+                )
+            else:
+                tail = (
+                    "开头先看他最后一句透露的状态（在家 / 在公司 / 在路上 / 在忙什么），"
+                    "别问和它冲突的话；隔了一夜就当新的一天，直接问他今天怎么样。"
+                )
+            return f"{core}。现在是{part}，{tail}"
         if kind == KIND_WAITING:
+            if owner_awake:
+                return (
+                    "先看记录里他最后说了什么：他刚说过话、人是醒着的，能接就接他那一句；"
+                    "不要提睡觉，也别问「还没睡吗 / 醒了吗」。"
+                    f"现在是{part}，别用「忙不忙」开场。"
+                )
             return (
                 "先看记录里他最后说了什么：能接就接他那一句；没有可接的，"
-                "就直接问他今天怎么样/在干嘛。不要为了开场编“刚收拾完/刚看到什么”。"
+                "就直接问他今天怎么样/在干嘛。不要为了开场编“刚收拾完/刚看到什么”，"
+                "也别问和记录里他的状态冲突的话。"
                 f"现在是{part}，别用「忙不忙」开场。"
             )
         if kind == KIND_COMPANY:
@@ -4790,7 +5140,8 @@ class EmotionCore(Star):
 
         返回空串表示通过；否则返回一句给日志/重写提示用的原因。
         这里只做**可证明**的检查，不猜语义：具体动作必须有她自己的近期原话，
-        他最后说要睡/在忙时不能再问“在干嘛/忙不忙”。
+        他最后说要睡/在忙时不能再问“在干嘛/忙不忙”；他一小时内说过话
+        （人醒着）时不能再问“睡没睡/醒没醒”或劝睡。
         """
         body = (text or "").strip()
         if not body:
@@ -4825,7 +5176,7 @@ class EmotionCore(Star):
         last_her = last_from("我")
         his_body = str(last_his.get("t") or "").strip()
         her_body = str(last_her.get("t") or "").strip()
-        if his_body and age_hours(last_his) <= 12.0:
+        if his_body and age_hours(last_his) <= SLEEP_ASK_WINDOW_HOURS:
             if _KW_SLEEP.search(his_body):
                 # "我也准备睡了/那我也睡啦"是顺着接，不是没看记录；只有
                 # 再问“睡了吗/在干嘛”或空泛地补一句晚安才拦。
@@ -4837,6 +5188,18 @@ class EmotionCore(Star):
             if age_hours(last_his) <= 3.0 and _KW_BUSY.search(his_body):
                 if re.search(r"忙不忙|有空吗|在干嘛|在吗", body):
                     return "他最后说在忙/开会，再问这些会像没看记录"
+        # 注意：age_hours 对没有 ts 的旧行返回 0（按“仍在上下文里”处理），
+        # 这里会偏保守；recent / group_tail 都带 ts，实际很少触发。
+        if (
+            his_body
+            and age_hours(last_his) * 60.0 <= AWAKE_WINDOW_MINUTES
+            and not _KW_SLEEP.search(his_body)
+            and _SLEEP_TOPIC_AT_HIM.search(body)
+        ):
+            # 他一小时内还说过话，就是醒着的；这时再问"睡了吗/醒了吗"、
+            # 劝他睡或说"等你醒了再聊"，会像根本没看见他刚才那句。
+            # 他自己已经说了"要睡/晚安"时交给上面那条判断，不在这里重复拦。
+            return "他一小时内刚说过话，别提睡觉/问他睡没睡"
         if (
             her_body
             and age_hours(last_her) <= 12.0
@@ -4905,7 +5268,7 @@ class EmotionCore(Star):
         if pool:
             return random.choice(pool)
         # 所有模板都被判冲突时，选一句不声称任何近况、也不追问的话。
-        return "突然想到你了"
+        return "想到你了"
 
     async def _gen_proactive_text(self, umo: str, kind: str) -> str:
         """先用 LLM 生成一句话，失败则用兜底台词。"""
@@ -4923,7 +5286,9 @@ class EmotionCore(Star):
         if inj:
             blocks.append(inj)
         # 主动消息也带“欲”的主动提示；正常聊天走 on_llm_request 的独立注入。
-        desire_hint = self._desire_injection(umo, proactive=True)
+        # commit=False：只取提示，不提交 30 分钟刷新——生成/发送失败时
+        # 不能把正常聊天的下一次欲注入提前消耗掉。
+        desire_hint = self._desire_injection(umo, proactive=True, commit=False)
         if desire_hint:
             blocks.append(desire_hint)
 
@@ -4931,7 +5296,6 @@ class EmotionCore(Star):
         now = datetime.now().astimezone()
         drives = st.get("drives") or {}
         exp = float(st.get("expectation", 0.0) or 0.0)
-        direction = self._proactive_direction(kind, drives, exp, now)
         last_text = str(st.get("last_proactive_text") or "").strip()
 
         # 时间锚点：跟 AstrBot 内置的时间感知同一套格式（<system_reminder> + Current datetime）
@@ -4941,13 +5305,20 @@ class EmotionCore(Star):
             # 目标是群时，"上次说话"以群里最近一次发言为准；没有群记录才退回私聊时间
             his_last = float(st.get("last_owner_group_msg", 0) or 0) or his_last
         her_last = float(st.get("last_proactive", 0) or 0)
+        # "他醒着吗"只看他最近有没有说话：一小时内说过就算醒着。
+        # 深夜劝完睡、他其实还醒着聊了几句，光看时段最容易把他判成"还没醒"。
+        his_gap = time.time() - his_last if his_last > 0 else 0.0
+        awake_recent = his_last > 0 and his_gap <= AWAKE_WINDOW_MINUTES * 60.0
+        direction = self._proactive_direction(
+            kind, drives, exp, now, owner_awake=awake_recent
+        )
         reminder = (
             f"Current datetime: {now:%Y-%m-%d %H:%M} ({now.tzname() or 'local'}), "
             f"Weekday: {_WEEKDAY_EN[now.weekday()]}"
         )
         if his_last > 0:
             reminder += (
-                f"\n他上一次说话是 {fmt_gap(time.time() - his_last)}"
+                f"\n他上一次说话是 {fmt_gap(his_gap)}"
                 f"（{self._msg_stamp(his_last)}）。"
             )
         if her_last > his_last:
@@ -4956,6 +5327,14 @@ class EmotionCore(Star):
                 "他一直没回。你自己的话在下面的记录里。"
             )
         time_block = f"<system_reminder>\n{reminder}\n</system_reminder>\n"
+        awake_block = ""
+        if awake_recent:
+            awake_block = (
+                "他最近一小时内说过话（时间见上），说明他醒着、没在睡。"
+                "这次开口不要碰睡觉这件事：不要问他睡没睡 / 醒没醒 / 是不是还在睡，"
+                "不要劝他「早点睡 / 去睡 / 闭眼」，也不要说「等你醒了再聊」；"
+                "直接接着他最后那句话往下说。\n"
+            )
 
         thought = "" if is_angry else _pending_hint(st.get("thoughts") or [])
         if thought:
@@ -5024,21 +5403,34 @@ class EmotionCore(Star):
                 "不要再用「忙不忙 / 有空吗」开头。\n"
             )
 
+        # 称呼不单独配：人设里怎么叫就怎么叫；人设没写就用「你」，别自己编。
+        address_block = (
+            "称呼用你人设里平时叫他的那个；人设里没写称呼，就直接用「你」，"
+            "别自己编一个新的。开口时找机会自然带一句——开头、撒娇、"
+            "说想他时都顺；不用每条都带，也别硬塞。\n"
+        )
+
         prompt = (
             time_block
+            + awake_block
             + direction
             + "\n"
             + tr_block
             + group_block
             + last_block
+            + address_block
             + "先看最后 3–5 条，确认他最后说了什么、你们停在哪，再写一条要发出去的消息：\n"
             + "- 1–3 句，总共不超过 60 个字，口语\n"
             + "- 可以用一句称呼或铺垫开头，再跟一句问句；最多两个问号\n"
             + "- 不要编近况：记录里没有的具体活动（刚洗完澡、刚下班、正在吃饭、看到什么）一律不提；"
             + "没有可接的事就直接说想他/问他今天怎么样\n"
-            + "- 他最后已经说要睡/在忙/出门时，别再问「在干嘛 / 睡了吗 / 忙不忙」或补一句晚安\n"
+            + "- 他最后已经透露了状态（到家 / 在家 / 在公司 / 在路上 / 出门 / 在忙 / 要睡）时，"
+            + "别再问和这个状态冲突的话（到家了吗 / 在干嘛 / 出门了吗 / 睡了吗 / 忙不忙）或补一句晚安\n"
+            + "- 他一小时内说过话就是醒着：别问「睡了吗 / 醒了吗 / 还没睡」，"
+            + "也别劝睡或说「等你醒了再聊」\n"
             + "- 只引用上面记录里真实出现过的内容；没提到的事，不要编具体时间、地点、约定\n"
             + "- 不确定就用「好像」「有点记不清」，或者只问不陈述\n"
+            + "- 想他就直接说想他，别加「突然」这个词\n"
             + "- 不要解释你在做什么，不要写动作括号，不要用引号\n"
             + "- 不要连续追问，别把话说成小作文\n"
             + "写完自己对照最后几条检查一遍，有矛盾就换一句。直接输出这句话本身。"
@@ -5888,43 +6280,33 @@ class EmotionCore(Star):
                     "先打开它才能使用成人向。"
                 )
                 return
-            hours = max(
-                0.0,
-                float(self._cfg("desire.adult_consent_hours", 24.0) or 0.0),
-            )
-            st["adult_paused"] = False
-            st["adult_paused_reason"] = ""
-            st["adult_scene_consent_until"] = 0.0
-            st["adult_ask_until"] = 0.0
-            if hours <= 0:
-                st["adult_consent_standing"] = True
-                st["adult_consent_until"] = 0.0
-                until = "直到你发 /adult off"
-            else:
-                st["adult_consent_standing"] = False
-                st["adult_consent_until"] = time.time() + hours * 3600
-                until = (
-                    f"{datetime.fromtimestamp(st['adult_consent_until']):%m-%d %H:%M}"
-                )
+            # 命令不一定经过 on_llm_request，这里把当前会话补进状态：
+            # _adult_body_ready() 要求“当前鱼主私聊”，不能拿旧 umo 判断。
+            st["umo"] = umo
+            was_allowed = self._adult_layer_allowed(umo)
+            until = self._open_adult_mode("命令")
+            ready = self._adult_body_ready(umo)
+            if ready and not was_allowed:
+                # 原本不在身体层：下一条消息会走 on_llm_request，注入一次。
+                # 已经在场景里时不清，避免同一场景重复注入。
+                st["adult_doc_scene_done"] = False
             self._save_state()
-            logger.info("[鱼的心] 成人向同意已打开（%s）", until)
             if st.get("desire_awakened"):
                 extra = "关系门槛已满足；具体是否进入身体层，仍看当时的欲和氛围。"
             else:
                 extra = "关系还没满格；这只是一张同意票，不会提前解锁身体层。"
-            yield event.plain_result(f"成人向同意已记录：{until}。{extra}")
+            if ready:
+                extra += "写法提示会跟在你下一条消息后面。"
+            elif st.get("desire_awakened"):
+                extra += "现在欲或状态还没到，先只记预授权；到了再说「我想要你」或再发 /adult on 就会生效。"
+            label = "成人模式已打开" if ready else "成人模式同意已记录"
+            yield event.plain_result(f"{label}：{until}。{extra}")
             return
 
         if arg in ("off", "关", "取消"):
-            st["adult_consent_until"] = 0.0
-            st["adult_consent_standing"] = False
-            st["adult_scene_consent_until"] = 0.0
-            st["adult_ask_until"] = 0.0
-            st["adult_paused"] = False
-            st["adult_paused_reason"] = ""
+            self._close_adult_mode("命令")
             self._save_state()
-            logger.info("[鱼的心] 成人向同意已关闭")
-            yield event.plain_result("成人向同意已撤销；欲会慢慢回落。")
+            yield event.plain_result("成人模式已关闭，同意已撤销；欲会慢慢回落。")
             return
 
         if arg in ("status", "状态"):
@@ -5941,8 +6323,8 @@ class EmotionCore(Star):
                 )
             else:
                 lines.append(
-                    "长期同意：未同意（/adult on 只是预授权；"
-                    "也可以在当前场景直接明确同意）"
+                    "长期同意：未同意（/adult on，或在场景里明确说要他；"
+                    "欲到 60 后打开才会带写法提示）"
                 )
             scene_until = float(st.get("adult_scene_consent_until", 0.0) or 0.0)
             if scene_until > time.time():
@@ -5955,6 +6337,35 @@ class EmotionCore(Star):
             lines.append(
                 "关系门槛：" + ("已解锁" if st.get("desire_awakened") else "未解锁")
             )
+            opened_ts = float(st.get("adult_mode_opened_ts", 0.0) or 0.0)
+            consent_on = bool(
+                st.get("adult_consent_standing")
+                or float(st.get("adult_consent_until", 0.0) or 0.0) > time.time()
+                or self._adult_scene_active()
+            )
+            if consent_on and self._adult_body_ready(umo):
+                when = (
+                    f"（{datetime.fromtimestamp(opened_ts):%m-%d %H:%M}）"
+                    if opened_ts else ""
+                )
+                lines.append(f"成人模式：已打开{when}")
+            elif consent_on:
+                lines.append(
+                    "成人模式：已预授权（欲/关系/状态还没到，暂不注入写法）"
+                )
+            else:
+                lines.append("成人模式：未打开（/adult on，或在场景里明确说要他）")
+            lines.append(
+                "成人模式写法："
+                + ("已就绪" if self._adult_mode_doc() else "未找到")
+            )
+            doc_ts = float(st.get("adult_mode_doc_ts", 0.0) or 0.0)
+            if doc_ts:
+                lines.append(
+                    "上次注入："
+                    f"{datetime.fromtimestamp(doc_ts):%m-%d %H:%M}"
+                    "（只在打开那一轮注入一次）"
+                )
             if st.get("adult_paused"):
                 if st.get("adult_paused_reason") == "soft_exit":
                     lines.append(

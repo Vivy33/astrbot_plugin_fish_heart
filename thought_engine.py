@@ -9,7 +9,7 @@
 
 生命周期：
     spawn  → 驱动没被满足，长出一个"想要"
-    live   → 注入进 system prompt，影响说话方式；主动开口时尝试一次
+    live   → 注入进本轮请求，影响说话方式；主动开口时尝试一次
     settle → 用户的话/事件把那个"想要"喂饱了 → pending=False，写入 mood
     fade   → 一直没被喂，到点凉掉 → 对应驱动轻微回落（release）
 """
@@ -509,7 +509,7 @@ def speak_bias(thoughts: list[dict], now: float | None = None) -> float:
 
 
 def pending_hint(thoughts: list[dict], now: float | None = None) -> str:
-    """给 system prompt 用的、当前最该惦记的一条。"""
+    """给注入用的、当前最该惦记的一条。"""
     now = time.time() if now is None else now
     live = [
         t
