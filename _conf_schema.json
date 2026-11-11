@@ -141,6 +141,20 @@
         "description": "启动时补发错过的消息",
         "default": true,
         "hint": "同样受冷却、日限、作息和「回避」状态约束。"
+      },
+      "topic_variety": {
+        "type": "bool",
+        "description": "主动开口换着话题说",
+        "default": true,
+        "invisible": true,
+        "hint": "开启后每次主动开口先挑一条话题线（问他今天 / 关心他 / 撒个娇 / 说件小事 / 说你们俩 / 说想你），最近两条用过的先避开、「想你」单独限频。黏人/想他时最容易句句都落在「想你」上，一天说几次就会出戏；关掉后回到 0.4.0 的旧口径，不再换话题。"
+      },
+      "miss_daily_max": {
+        "type": "int",
+        "description": "「想你」一天最多几次",
+        "default": 1,
+        "invisible": true,
+        "hint": "只在「主动开口换着话题说」开启时生效：她主动说「想你」一天最多这么多次（默认 1 次），两次之间至少还要隔 8 小时。说满后这天再开口会换别的说法；发消息前自检也会拦下这一天里第二句「想你」。填 0 等于当天不再单独说想你。"
       }
     }
   },
@@ -310,7 +324,7 @@
       "lock_below": {
         "type": "float",
         "description": "掉到多少锁回（低于）",
-        "default": 75.0,
+        "default": 70.0,
         "hint": "解锁后任意一条掉到这个值以下，欲快速回落并锁回隐藏层。",
         "invisible": true
       },
@@ -360,6 +374,62 @@
         "description": "欲到 100 后的收益减半时长（小时）",
         "default": 6.0,
         "hint": "欲刚到 100 时开始计时；在这段时间内，正向涨欲收益减半。填 0 = 关闭这个饱和期。",
+        "invisible": true
+      },
+      "sage_enabled": {
+        "type": "bool",
+        "description": "亲密完成后进入贤者期",
+        "default": true,
+        "hint": "打开后，成人场景持续够久、又出现事后收束词（结束了/我到了/完事了…）时，欲会大幅回落到成人层门槛以下，并进入一段不应期；关掉完全回到旧行为。",
+        "invisible": true
+      },
+      "sage_drop_ratio": {
+        "type": "float",
+        "description": "贤者期掉欲比例",
+        "default": 0.6,
+        "hint": "完成时按这个比例掉欲（0.6 = 保留 40%）。默认会把 100 打到 40、60 打到 24，都会低于成人层门槛 60。",
+        "invisible": true
+      },
+      "sage_floor": {
+        "type": "float",
+        "description": "贤者期掉完的下限",
+        "default": 20.0,
+        "hint": "掉完不低于这个值，避免掉到 0 之后要很久才回到 60。",
+        "invisible": true
+      },
+      "sage_hours": {
+        "type": "float",
+        "description": "贤者期（不应期）时长（小时）",
+        "default": 2.0,
+        "hint": "这段时间内不主动往身体层走，正向涨欲按 sage_gain_scale 计。填 0 = 只掉欲、不设不应期。",
+        "invisible": true
+      },
+      "sage_gain_scale": {
+        "type": "float",
+        "description": "贤者期内正向涨欲系数",
+        "default": 0.0,
+        "hint": "0 = 完全撩不动；想要温和一点可改 0.25。只压正向，责骂照常扣。",
+        "invisible": true
+      },
+      "sage_min_scene_minutes": {
+        "type": "float",
+        "description": "算「完成」前场景最少持续多久（分钟）",
+        "default": 15.0,
+        "hint": "挡住刚进场景就说「结束了」的误判。",
+        "invisible": true
+      },
+      "sage_finish_words": {
+        "type": "list",
+        "description": "追加的「完成」识别词",
+        "default": [],
+        "hint": "内置词已经覆盖常见说法；这里只用来补你自己的说法。",
+        "invisible": true
+      },
+      "sage_soft_exit_counts": {
+        "type": "bool",
+        "description": "亲密场景里的「晚安」也算完成",
+        "default": false,
+        "hint": "打开后，如果本场景出现过明确成人邀请（想要你/想亲你等）、且场景持续够久，「晚安 / 睡觉吧 / 抱一会儿就好」也按完成处理，进贤者期。纯抱抱、纯聊天的晚安仍然只收尾。默认关，避免升级后行为突变。",
         "invisible": true
       }
     }

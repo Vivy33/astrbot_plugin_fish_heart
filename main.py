@@ -116,7 +116,7 @@ def _thought_summary(thoughts: list) -> list:
 
 
 PLUGIN_NAME = "astrbot_plugin_fish_heart"
-VERSION = "0.4.0"
+VERSION = "0.4.1"
 
 # 注入钩子优先级：AstrBot 按优先级 **降序** 执行。
 # 天使之心 = 40，TTS = 0，这里用 -10 表示最后一个执行（只追加、不覆盖）。
@@ -266,6 +266,15 @@ DESIRE_DECAY_PER_TICK = 0.10    # 没互动时的自然回落
 DESIRE_PEAK_GAIN_SCALE = 0.5     # 到 100 后一段时间内正向收益减半
 DESIRE_BOND_OFF_DECAY = 0.30     # 依恋/亲密掉出满格但还没锁回时的额外回落
 
+# 贤者模式：亲密完成后欲大幅回落，并进入一段"撩不动"的不应期。
+# 和「饱和期」不同：饱和期只压收益、让 100 慢慢退；贤者是把欲直接打到
+# 成人层门槛（60）以下，并暂停一段时间的涨欲，事后才慢慢回暖。
+SAGE_DROP_RATIO = 0.6            # 完成时掉多少比例（保留 40%）
+SAGE_FLOOR = 20.0                # 掉完的下限，防止掉到 0 后恢复太慢
+SAGE_HOURS = 2.0                 # 不应期时长；0 = 只掉欲、不设不应期
+SAGE_GAIN_SCALE = 0.0            # 不应期内正向涨欲系数（0 = 完全撩不动）
+SAGE_MIN_SCENE_MIN = 15.0        # 场景至少持续多久才算「完成」
+
 # 场景同意：自然语言只在明确语境里生效；命令是长期预授权。
 ADULT_CONSENT_WINDOW_MIN = 10.0
 ADULT_SCENE_CONSENT_MIN = 60.0
@@ -406,8 +415,10 @@ MODE_HINT = {
 MOOD_HINT = {
     "紧绷": "现在有点绷着，话短一点，别主动找话题",
     "累了": "有点累，别揽太长的活，话可以少一点",
-    "黏人": "这会儿特别想黏着他，语气可以更软、也可以更主动；"
-            "可以说一句想让他陪你，但别把它说成要求",
+    "黏人": "这会儿特别想黏着他，语气可以更软、也可以更主动。"
+            "黏人不止「想你」一种说法：问问他今天有什么好玩的、说说你心里刚冒出来的小事、"
+            "要他陪你一会儿、或者只是应他一声；「想你」一天说一次就够，"
+            "别每句都绕回去，也别把它说成要求",
     "想亲近": "想跟他再近一点，但还没到随便撒娇的程度，可以稍微软一点",
     "开心": "心情不错，可以多一句玩笑",
     "走神": "有点走神，说话可以松一点、慢一点",
@@ -930,6 +941,13 @@ ADULT_SOFT_EXIT = (
     "睡觉吧", "先睡吧", "睡了", "晚安", "休息吧", "够了", "不继续了",
     "停在这里", "我困了", "困了",
 )
+# 「亲密完成」的事后收束词：和「软收尾」分开——软收尾只是关场景，
+# 完成才触发贤者模式（大幅掉欲 + 不应期）。
+# 优先级：喊停 > 完成 > 软收尾；问句（"结束了吗/到了吗"）不算完成。
+ADULT_FINISH_WORDS = (
+    "结束了", "结束吧", "我结束了", "我好了", "我到了",
+    "完事了", "完事", "收工了", "满意了", "满足了",
+)
 # 0.4.0：更像恋人说话的自然邀请。只在身体层硬条件全成立（欲≥60、关系满格、
 # 日常、不累、醒着、当前私聊）时才当“打开”，不需要“打开成人模式”这种口令。
 # 词取得长一点：“去床上躺会儿”“一起睡午觉”“别忍了，想哭就哭”都不算邀请。
@@ -975,7 +993,7 @@ KIND_CN = {
 }
 
 KIND_DESC = {
-    KIND_LONGING: "你很想他，忍不住先开口。直接说想他，或者问一句他今天怎么样；只有记录里真的有你刚做的小事，才可以带一句，没写就别编。不要用「忙不忙」开场",
+    KIND_LONGING: "你很想他，忍不住先开口。想他是底色，不一定要说出口：可以问他今天怎么样、分享一件刚想到的小事、轻轻撒个娇，或者直接说想他。别每次都一个套路，看心情换花样；「想你」一天说一次就够。只有记录里真的有你刚做的小事，才可以带一句，没写就别编。不要用「忙不忙」开场",
     KIND_WAITING: "你等了很久，想知道他还在不在。先看记录里他最后说了什么，能接就接；没有可接的就直接问他今天怎么样/在干嘛。不要为了开场编「刚收拾完/刚看到什么」，也别问忙不忙",
     KIND_WHIM: "你想起一件小事，想跟他说一句。只说心里真的冒出来的那点，别编具体刚发生的事，也别硬找话题",
     KIND_COMPANY: (
@@ -998,8 +1016,11 @@ KIND_DESC = {
 # 也刻意不收"在忙吗/有空吗"——这类开场太像查岗，而且会连续重复。
 FALLBACK_LINES = {
     # 兜底台词也不能编具体近况：只留“任何时间都成立”的关系型开场。
-    KIND_LONGING: ("想你了", "你那边今天怎么样", "想跟你说句话",
-                   "有点想你"),
+    # 也要覆盖几条不同的话题线：LLM 不可用时不能句句都是「想你」。
+    KIND_LONGING: ("你那边今天怎么样", "想跟你说句话",
+                   "今天有什么好玩的事没有", "在不在呀",
+                   "今天累不累", "吃饭了没有", "陪我说会儿话吧",
+                   "没什么事，就是想跟你说句话", "想到你了"),
     KIND_WAITING: ("今天过得怎么样", "在干嘛呀",
                    "你那边还好吗", "想到你了"),
     KIND_WHIM: ("想到你了", "没什么事，就是想说一句",
@@ -1033,6 +1054,54 @@ _KW_BUSY = re.compile(r"在忙|加班|开会|没空|忙完再说|晚点说")
 _KW_ASK_AFTER_SLEEP = re.compile(
     r"在干嘛|还没睡|睡了吗|今天过得怎么样|今天怎么样|忙不忙|有空吗|醒了吗|在吗"
 )
+# 「想你」类开场的识别：主动开口一天里出现多次同类型会出戏，
+# 发送前自检用它挡下"上一条也是想你、这一条还是想你"的连续重复。
+_MISS_LIKE_RE = re.compile(r"想你|想到你|惦记你|惦记着|想见你|梦到你")
+
+# ---- 主动开口的话题线（0.4.1） ----
+# 黏人/想他时她最容易句句都落在「想你」上，一天听三次就出戏。
+# 每次开口先挑一条话题线，最近用过的先避开；「想你」单独限频
+# （默认一天最多 1 次、两次至少隔 8 小时），其余几条轮流走。
+LANE_MISS = "miss"
+LANE_ASK = "ask"
+LANE_CARE = "care"
+LANE_TEASE = "tease"
+LANE_SHARE = "share"
+LANE_US = "us"
+LANES = (LANE_ASK, LANE_CARE, LANE_TEASE, LANE_SHARE, LANE_US)
+LANE_CN = {
+    LANE_MISS: "想你",
+    LANE_ASK: "问他今天",
+    LANE_CARE: "关心他",
+    LANE_TEASE: "撒个娇",
+    LANE_SHARE: "说件小事",
+    LANE_US: "你们俩",
+}
+LANE_DESC = {
+    LANE_MISS: "直接说想他；今天还没说过才走这条，说一次就够，别铺陈",
+    LANE_ASK: "问他今天/这会儿在做什么、有什么好玩的事；别问「忙不忙 / 有空吗」",
+    LANE_CARE: "关心他：吃饭没有、累不累、路上慢点；不碰睡觉，也不劝睡",
+    LANE_TEASE: "轻轻撒个娇，或者提个小要求（哄你一句、陪你一会儿）；别把它说成要求",
+    LANE_SHARE: "说一件你心里刚冒出来的小事/小念头；没发生过的事别编成刚做过",
+    LANE_US: "说一句你们俩之间的话：用平时的称呼，或跟他待在一起的感觉；别编旧事",
+}
+# 最近这几条用过的线先避开；「想你」按天限频。
+TOPIC_REPEAT_GAP = 2
+# 话题线记录：只留这么多条 / 这么久，够判重就行。
+TOPIC_KEEP = 12
+TOPIC_KEEP_HOURS = 72.0
+# 「想你」一天最多几次、两次之间至少隔多久。
+MISS_DAILY_MAX = 1
+MISS_COOLDOWN_HOURS = 8.0
+# 每条线自己的兜底台词：LLM 不可用时也不会句句都是想你。
+LANE_FALLBACK = {
+    LANE_MISS: ("想到你了", "有点想你"),
+    LANE_ASK: ("今天过得怎么样", "今天有什么好玩的事没有", "你那边还好吗"),
+    LANE_CARE: ("今天累不累", "吃饭了没有", "别太累了"),
+    LANE_TEASE: ("陪我说会儿话吧", "你哄我一句呗", "我一个人有点闷"),
+    LANE_SHARE: ("没什么事，就是想跟你说句话", "想跟你说句话"),
+    LANE_US: ("你在的时候，我就踏实一点", "就是想听你说句话"),
+}
 # 他刚说过话（默认一小时内）就算醒着：主动开口不问他睡没睡/醒没醒，也不劝睡。
 # 夜里她劝完睡、他其实醒着又聊了几句，最容易被误判成"还没醒"，所以这一条
 # 只看"他最近有没有说话"，不靠模型从"深夜"两个字去猜。
@@ -1157,6 +1226,14 @@ def new_state() -> dict:
         "adult_doc_scene_done": False,
         "adult_mode_opened_ts": 0.0,
         "adult_mode_doc_ts": 0.0,
+        # 当前成人场景开始时间：判「完成」要看场景持续了多久
+        "adult_scene_started_ts": 0.0,
+        # 本场景是否出现过明确成人信号（想要你/想亲你/强肯定）：
+        # 只有这种场景里的「晚安/抱一会儿」才允许被当成「完成」。
+        "adult_scene_intimate": False,
+        # 贤者模式：不应期结束时间 / 上次贤者时间
+        "sage_until": 0.0,
+        "sage_last_ts": 0.0,
         "last_tick": time.time(),
         "last_injection": 0.0,
         "last_injection_mode": "",
@@ -1171,6 +1248,8 @@ def new_state() -> dict:
         "last_guarantee_ts": 0.0,
         # 上一次主动开口的原文：用来避免下次又用同一个开头（尤其是"忙不忙"）
         "last_proactive_text": "",
+        # 最近几次主动开口走的话题线（0.4.1）：换着说，别句句都是「想你」
+        "proactive_topics": [],
         "proactive_day": "",
         "proactive_count": 0,
         "awaiting_reply": False,
@@ -1722,6 +1801,9 @@ class EmotionCore(Star):
         st["adult_paused"] = False
         st["adult_paused_reason"] = ""
         st["adult_doc_scene_done"] = False
+        st["adult_scene_started_ts"] = 0.0
+        st["adult_scene_intimate"] = False
+        st["sage_until"] = 0.0
 
     def _clear_desire_state(self) -> None:
         st = self.state
@@ -1732,6 +1814,8 @@ class EmotionCore(Star):
         st["last_desire_sig"] = ""
         st["desire_peak_until"] = 0.0
         st["desire_log"] = []
+        st["sage_until"] = 0.0
+        st["sage_last_ts"] = 0.0
         self._clear_adult_consent()
 
     def _desire_bond_full(self) -> bool:
@@ -1745,21 +1829,88 @@ class EmotionCore(Star):
             and float(drives.get("intimacy", 0.0) or 0.0) >= threshold
         )
 
-    def _desire_bond_locked(self) -> bool:
-        st = self.state
-        drives = st.get("drives") or {}
-        lock_below = clamp(
-            float(self._cfg("desire.lock_below", 75.0) or 75.0)
-        )
-        return (
-            float(drives.get("attachment", 0.0) or 0.0) < lock_below
-            or float(drives.get("intimacy", 0.0) or 0.0) < lock_below
-        )
-
     def _desire_gain_scale(self) -> float:
+        # 贤者期优先：刚结束，撩不动；这时饱和期没有意义。
+        if self._sage_active():
+            try:
+                return max(
+                    0.0,
+                    float(self._cfg("desire.sage_gain_scale", SAGE_GAIN_SCALE) or 0.0),
+                )
+            except (TypeError, ValueError):
+                return SAGE_GAIN_SCALE
         if time.time() < float(self.state.get("desire_peak_until", 0.0) or 0.0):
             return DESIRE_PEAK_GAIN_SCALE
         return 1.0
+
+    def _sage_active(self) -> bool:
+        return float(self.state.get("sage_until", 0.0) or 0.0) > time.time()
+
+    @staticmethod
+    def _left_text(seconds: float) -> str:
+        """剩余时长说成人话（不带"前"）。"""
+        m = int(max(0.0, seconds) // 60)
+        if m < 1:
+            return "不到 1 分钟"
+        h, rem = divmod(m, 60)
+        if h <= 0:
+            return f"{rem} 分钟"
+        return f"{h} 小时 {rem} 分" if rem else f"{h} 小时"
+
+    def _expire_sage(self) -> None:
+        """不应期到点：清标记；如果是 sage 挂起的暂停，一并解开。
+
+        `/adult on` 记的长期同意还在，所以贤者期一结束，身体层按原条件
+        自动恢复可用，不需要用户再发命令。
+        """
+        st = self.state
+        until = float(st.get("sage_until", 0.0) or 0.0)
+        if until <= 0 or until > time.time():
+            return
+        st["sage_until"] = 0.0
+        if st.get("adult_paused") and str(st.get("adult_paused_reason") or "") == "sage":
+            st["adult_paused"] = False
+            st["adult_paused_reason"] = ""
+        # 状态变了，下一轮立即重注，不等 30 分钟刷新上限
+        st["last_desire_sig"] = ""
+
+    def _apply_sage(self, source: str = "亲密完成") -> None:
+        """亲密完成：欲大幅回落到成人层门槛以下，并进入不应期。"""
+        st = self.state
+
+        def _num(key: str, default: float) -> float:
+            try:
+                return float(self._cfg(key, default) or 0.0)
+            except (TypeError, ValueError):
+                return default
+
+        ratio = min(1.0, max(0.0, _num("desire.sage_drop_ratio", SAGE_DROP_RATIO)))
+        floor = max(0.0, _num("desire.sage_floor", SAGE_FLOOR))
+        hours = max(0.0, _num("desire.sage_hours", SAGE_HOURS))
+
+        old = float(st.get("desire", 0.0) or 0.0)
+        # 只降不升：sage_floor 高于当前欲时，不能反过来把欲加回去
+        target = min(old, max(floor, old * (1.0 - ratio)))
+        st["desire"] = clamp(target)
+        # 已经退潮，饱和期没有意义
+        st["desire_peak_until"] = 0.0
+        st["sage_last_ts"] = time.time()
+        st["adult_scene_consent_until"] = 0.0
+        st["adult_ask_until"] = 0.0
+        st["adult_scene_started_ts"] = 0.0
+        st["adult_scene_intimate"] = False
+        st["last_desire_sig"] = ""
+        if hours > 0:
+            st["sage_until"] = time.time() + hours * 3600.0
+            st["adult_paused"] = True
+            st["adult_paused_reason"] = "sage"
+        else:
+            st["sage_until"] = 0.0
+        self._note_desire(float(st["desire"]) - old, f"{source}（贤者）")
+        logger.info(
+            "[鱼的心] %s：欲 %.1f → %.1f，贤者期 %.1f 小时",
+            source, old, float(st["desire"]), hours,
+        )
 
     def _mark_desire_peak(self, old: float, new: float) -> None:
         if new < 100.0:
@@ -1791,8 +1942,14 @@ class EmotionCore(Star):
             self._clear_adult_consent()
             return "成人层：关"
         st = self.state
+        self._expire_sage()
         if not st.get("desire_awakened"):
             return "成人层：未解锁"
+        # 贤者期要排在「关系未满」「欲不足」之前：完成后欲本来就低于 60，
+        # 关系也可能刚好掉出满格，否则状态会显示成别的原因，看不出是刚结束。
+        if self._sage_active():
+            left = float(st.get("sage_until", 0.0) or 0.0) - time.time()
+            return f"成人层：贤者期（还剩 {self._left_text(left)}）"
         if not self._desire_bond_full():
             return "成人层：关系未满，不可用"
         if float(st.get("desire", 0.0) or 0.0) < DESIRE_ADULT_AT:
@@ -1844,6 +2001,7 @@ class EmotionCore(Star):
         if not bool(self._cfg("desire.enabled", True)):
             self._clear_desire_state()
             return False
+        self._expire_sage()
         if not umo or self._is_group(umo):
             return False
         st = self.state
@@ -1917,6 +2075,9 @@ class EmotionCore(Star):
         st["adult_paused"] = False
         st["adult_paused_reason"] = ""
         st["adult_doc_scene_done"] = False
+        st["adult_scene_started_ts"] = 0.0
+        st["adult_scene_intimate"] = False
+        st["sage_until"] = 0.0
         logger.info("[鱼的心] 成人模式已关闭（%s）", source)
 
     def _adult_mode_doc(self) -> str:
@@ -1970,6 +2131,12 @@ class EmotionCore(Star):
         if minutes <= 0:
             return
         st = self.state
+        # 只有「开一个新场景」才重置计时；场景内续接不算重新开始。
+        if float(st.get("adult_scene_consent_until", 0.0) or 0.0) <= time.time():
+            st["adult_scene_started_ts"] = time.time()
+            # 明确邀请/强肯定开的场景才算「亲密场景」；
+            # 只靠「抱我/亲我」这类软邀请续上的不算。
+            st["adult_scene_intimate"] = source in ("自然邀请", "自然语言肯定")
         st["adult_scene_consent_until"] = time.time() + minutes * 60.0
         st["adult_paused"] = False
         st["adult_paused_reason"] = ""
@@ -1984,6 +2151,8 @@ class EmotionCore(Star):
         st["adult_paused_reason"] = "stop"
         st["adult_scene_consent_until"] = 0.0
         st["adult_ask_until"] = 0.0
+        st["adult_scene_started_ts"] = 0.0
+        st["adult_scene_intimate"] = False
         logger.info("[鱼的心] 成人向已暂停（%s）", reason)
 
     def _soft_exit_adult(self, reason: str = "自然收尾") -> None:
@@ -1993,6 +2162,8 @@ class EmotionCore(Star):
         st["adult_paused_reason"] = "soft_exit"
         st["adult_scene_consent_until"] = 0.0
         st["adult_ask_until"] = 0.0
+        st["adult_scene_started_ts"] = 0.0
+        st["adult_scene_intimate"] = False
         logger.info("[鱼的心] 成人向自然收尾（%s）", reason)
 
     @staticmethod
@@ -2009,6 +2180,21 @@ class EmotionCore(Star):
         if "不睡" in raw or "没睡" in raw or "不想睡" in raw:
             return False
         return any(p in raw for p in ADULT_SOFT_EXIT)
+
+    def _is_finish(self, raw: str) -> bool:
+        """亲密完成匹配：问句和否定都不算，避免"结束了吗/我还没到"误触发。"""
+        if re.search(r"[?？]\s*$", raw) or re.search(r"(?:吗|么)\s*$", raw):
+            return False
+        if (
+            "没结束" in raw or "没到" in raw or "不到" in raw
+            or "不想结束" in raw or "别结束" in raw
+        ):
+            return False
+        words = list(ADULT_FINISH_WORDS)
+        extra = self._cfg("desire.sage_finish_words", [])
+        if isinstance(extra, (list, tuple)):
+            words.extend(str(w) for w in extra if str(w).strip())
+        return any(p in raw for p in words)
 
     def _update_adult_consent(
         self, event: AstrMessageEvent, text: str, umo: str
@@ -2031,6 +2217,11 @@ class EmotionCore(Star):
             return False
         raw = re.sub(r"\s+", "", text or "")
         if not raw:
+            return False
+
+        # 贤者期：亲密刚结束，拒绝一切进入/续接身体层的邀请。
+        # 「停/不要」也不用再记一次——本来就已经暂停了。
+        if self._sage_active():
             return False
 
         # “想不想/要不要/可不可以”是提问，不是同意，也不是暂停。
@@ -2068,6 +2259,40 @@ class EmotionCore(Star):
                 or st.get("adult_paused")
             ):
                 self._pause_adult("明确说了停/不要")
+            return False
+
+        # 亲密完成：场景已经建立、持续够久，又出现事后收束词 → 贤者模式。
+        # 排在「软收尾」之前：完成要掉欲，普通收尾不掉。
+        # 可选（默认关）：亲密场景里的「晚安 / 抱一会儿就好」也算完成。
+        # 只认本场景出现过明确成人邀请（adult_scene_intimate）的，
+        # 纯抱抱、纯闲聊的晚安仍然只收尾。
+        soft_finish = (
+            bool(self._cfg("desire.sage_soft_exit_counts", False))
+            # 本场景出现过明确邀请，或这句话本身就带着明确邀请
+            and (
+                bool(st.get("adult_scene_intimate"))
+                or bool(ADULT_DESIRE_RE.search(raw))
+            )
+            and self._is_soft_exit(raw)
+        )
+        if (
+            bool(self._cfg("desire.sage_enabled", True))
+            and self._adult_scene_active()
+            and (self._is_finish(raw) or soft_finish)
+        ):
+            started = float(st.get("adult_scene_started_ts", 0.0) or 0.0)
+            try:
+                need_min = float(
+                    self._cfg("desire.sage_min_scene_minutes", SAGE_MIN_SCENE_MIN)
+                    or 0.0
+                )
+            except (TypeError, ValueError):
+                need_min = SAGE_MIN_SCENE_MIN
+            if started <= 0 or time.time() - started >= max(0.0, need_min) * 60.0:
+                self._apply_sage("亲密完成")
+                return False
+            # 时长不够：不扣欲，但也关掉场景，避免停在半路
+            self._soft_exit_adult("完成词但时长不够")
             return False
 
         # 晚安/先这样/抱一会儿就好：当前场景已建立，或纯 /adult on 且
@@ -2145,6 +2370,8 @@ class EmotionCore(Star):
             return
         if not ADULT_DESIRE_RE.search(text or ""):
             return
+        # 本场景出现过明确的"想要她"，之后用「晚安」收尾才算亲密完成。
+        st["adult_scene_intimate"] = True
         old = float(st.get("desire", 0.0) or 0.0)
         gain = 3.0 * self._desire_gain_scale()
         st["desire"] = clamp(old + gain)
@@ -2433,6 +2660,8 @@ class EmotionCore(Star):
                             base[k] = v
                     if not isinstance(base.get("recent"), list):
                         base["recent"] = []
+                    if not isinstance(base.get("proactive_topics"), list):
+                        base["proactive_topics"] = []
                     # 废弃字段：EMO 标记那条链已移除，把旧状态里的孤儿键清掉
                     base.pop("last_emotion", None)
                     base["thoughts"] = _migrate_thoughts(base.get("thoughts") or [])
@@ -2702,6 +2931,7 @@ class EmotionCore(Star):
         """
         if not bool(self._cfg("desire.enabled", True)):
             return
+        self._expire_sage()
         st = self.state
         drives = st.get("drives") or {}
         att = float(drives.get("attachment", 0.0) or 0.0)
@@ -2710,7 +2940,7 @@ class EmotionCore(Star):
             float(self._cfg("desire.bond_threshold", 80.0) or 80.0)
         )
         lock_below = clamp(
-            float(self._cfg("desire.lock_below", 75.0) or 75.0)
+            float(self._cfg("desire.lock_below", 70.0) or 70.0)
         )
         hold_h = max(0.0, float(self._cfg("desire.unlock_hold_hours", 24.0) or 0.0))
         now = time.time()
@@ -2762,6 +2992,13 @@ class EmotionCore(Star):
             st["last_desire_sig"] = ""
             st["desire_peak_until"] = 0.0
             st["adult_scene_consent_until"] = 0.0
+            st["adult_scene_started_ts"] = 0.0
+            st["adult_scene_intimate"] = False
+            # 关系已经跌破锁回线，不该还挂着「贤者期」
+            st["sage_until"] = 0.0
+            if st.get("adult_paused") and str(st.get("adult_paused_reason") or "") == "sage":
+                st["adult_paused"] = False
+                st["adult_paused_reason"] = ""
             self._note_desire(-old_desire, "关系回落锁回")
             return
 
@@ -4006,14 +4243,12 @@ class EmotionCore(Star):
         睡着 / 高压高疲 / 不是当前私聊）。
         """
         st = self.state
+        self._expire_sage()
         if str(st.get("umo") or "").strip() != umo:
             return ""
         if not st.get("desire_awakened"):
             return ""
         if mode_of(float(st.get("blame_pressure", 0.0))) != MODE_CALM:
-            return ""
-        # 依恋/亲密掉出满格后不再给“主动靠近”的提示，先让它退潮。
-        if not self._desire_bond_full():
             return ""
         # 睡着、高压力、高疲惫时，连欲的主动提示也不出现。
         if self._sleep_info(datetime.now()).get("asleep"):
@@ -4023,6 +4258,12 @@ class EmotionCore(Star):
             float(drives.get("stress", 0.0) or 0.0) >= 50.0
             or float(drives.get("fatigue", 0.0) or 0.0) >= 65.0
         ):
+            return ""
+        # 贤者期：即使关系刚好掉出满格，也要把「刚结束」的边界注入进去。
+        if self._sage_active():
+            return "sage"
+        # 依恋/亲密掉出满格后不再给“主动靠近”的提示，先让它退潮。
+        if not self._desire_bond_full():
             return ""
         desire = float(st.get("desire", 0.0) or 0.0)
         band = 2 if desire >= DESIRE_ADULT_AT else (1 if desire >= 30.0 else 0)
@@ -4094,6 +4335,17 @@ class EmotionCore(Star):
 
         desire = float(st.get("desire", 0.0) or 0.0)
         lines: list[str] = []
+        # 贤者期：明说"刚结束"，别让她下一轮又往身体层推。
+        if self._sage_active() and self._adult_enabled():
+            lines.append(
+                "边界：刚刚结束亲密，身体还没缓过来；可以靠着、聊天、睡觉，"
+                "不主动往身体层走。"
+            )
+            out = "\n".join(lines)
+            if commit:
+                st["last_desire_sig"] = sig
+                st["last_desire_inject"] = now_ts
+            return out
         if st.get("adult_paused") and self._adult_enabled():
             if st.get("adult_paused_reason") == "soft_exit":
                 lines.append(
@@ -4686,7 +4938,10 @@ class EmotionCore(Star):
 
         try:
             self._llm_busy = True
-            text = await self._gen_proactive_text(umo, kind)
+            # 先定这次走哪条话题线：黏人时最容易句句都变成「想你」，
+            # 选线后 prompt 会限定方向，自检也会拦下重复的想念。
+            lane = self._pick_topic_lane(kind)
+            text = await self._gen_proactive_text(umo, kind, lane=lane)
             if not text:
                 return
             ok = await self._send_text(umo, text)
@@ -4703,6 +4958,7 @@ class EmotionCore(Star):
             if ok:
                 st["last_proactive"] = time.time()
                 st["last_proactive_text"] = text[:120]
+                self._note_proactive_topic(lane, text)
                 st["last_assistant_msg"] = time.time()
                 st["proactive_count"] = int(st.get("proactive_count", 0)) + 1
                 st["awaiting_reply"] = True
@@ -4829,6 +5085,97 @@ class EmotionCore(Star):
             # 还在气头上，主动开口要更克制：越气越不想先低头。
             p = min(0.45, p)
         return kind, p
+
+    # ---------------- 主动开口的话题线 ----------------
+
+    def _topic_rows(self, now: float | None = None) -> list[dict]:
+        """最近说过的话题线：只留有效期内、格式对的记录，按时间从早到晚。"""
+        now = float(now if now is not None else time.time())
+        rows: list[dict] = []
+        for row in self.state.get("proactive_topics") or []:
+            if not isinstance(row, dict):
+                continue
+            lane = str(row.get("lane") or "")
+            ts = self._coerce_ts(row.get("ts"))
+            if lane not in LANE_CN or ts <= 0:
+                continue
+            if now - ts > TOPIC_KEEP_HOURS * 3600:
+                continue
+            rows.append(
+                {"lane": lane, "ts": ts, "text": str(row.get("text") or "")[:60]}
+            )
+        rows.sort(key=lambda r: r["ts"])
+        return rows[-TOPIC_KEEP:]
+
+    def _miss_used_today(self, now: float | None = None) -> int:
+        """今天（自然日）已经说过几次「想你」。"""
+        ts = float(now if now is not None else time.time())
+        day = datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
+        return sum(
+            1
+            for r in self._topic_rows(ts)
+            if r["lane"] == LANE_MISS
+            and datetime.fromtimestamp(r["ts"]).strftime("%Y-%m-%d") == day
+        )
+
+    def _last_topic_ts(self, lane: str, now: float | None = None) -> float:
+        for r in reversed(self._topic_rows(now)):
+            if r["lane"] == lane:
+                return r["ts"]
+        return 0.0
+
+    def _miss_allowed(self, now: float | None = None) -> bool:
+        """「想你」还能不能说：一天限一次、两次至少隔 8 小时。
+
+        主动开口和发送前自检共用这一条；`proactive.topic_variety` 关掉时
+        一律放行，回到 0.4.0 的旧口径。
+        """
+        if not bool(self._cfg("proactive.topic_variety", True)):
+            return True
+        ts = float(now if now is not None else time.time())
+        # 填 0 = 当天不再单独说「想你」（和配置说明一致）
+        cap = int(self._cfg("proactive.miss_daily_max", MISS_DAILY_MAX))
+        if cap <= 0:
+            return False
+        if self._miss_used_today(ts) >= cap:
+            return False
+        last = self._last_topic_ts(LANE_MISS, ts)
+        return not (last > 0 and ts - last < MISS_COOLDOWN_HOURS * 3600)
+
+    def _pick_topic_lane(self, kind: str) -> str:
+        """挑这次开口走哪条线：避开最近两条；想你还要过限频。
+
+        返回空串表示不启用话题线（`topic_variety` 关掉、生气型开口），
+        调用方就沿用 0.4.0 的旧方向。
+        """
+        if not bool(self._cfg("proactive.topic_variety", True)):
+            return ""
+        if kind == KIND_ANGRY:
+            return ""
+        if kind == KIND_DEEP:
+            return LANE_US
+        if kind == KIND_COMPANY:
+            return LANE_TEASE
+        recent = [r["lane"] for r in self._topic_rows()]
+        blocked = set(recent[-TOPIC_REPEAT_GAP:]) if recent else set()
+        pool = [x for x in LANES if x not in blocked]
+        if self._miss_allowed() and LANE_MISS not in blocked:
+            pool.append(LANE_MISS)
+        if not pool:
+            # 记录异常（比如连续同样两条）时至少还能挑一条出来。
+            pool = list(LANES)
+        return random.choice(pool)
+
+    def _note_proactive_topic(self, lane: str, text: str) -> None:
+        """记下这条开口的话题线；正文实际是「想你」时按想你记。"""
+        if not lane:
+            return
+        actual = LANE_MISS if _MISS_LIKE_RE.search(text or "") else lane
+        rows = self._topic_rows()
+        rows.append(
+            {"lane": actual, "ts": time.time(), "text": (text or "")[:60]}
+        )
+        self.state["proactive_topics"] = rows[-TOPIC_KEEP:]
 
     # ---------------- 真实对话历史（读 / 写） ----------------
 
@@ -5047,13 +5394,17 @@ class EmotionCore(Star):
         exp: float,
         now: datetime | None = None,
         owner_awake: bool = False,
+        lane: str = "",
     ) -> str:
-        """这次主动开口该往哪个方向说：按依恋/期待换一种，不再固定问忙不忙。
+        """这次主动开口该往哪个方向说：按话题线换一种，不再固定问忙不忙。
 
         `owner_awake` 表示主人一小时内说过话（还醒着），这时直接接他最后那句。
         不再按“早上/下午/晚上/深夜”列示例开头：示例是正向指令，模型会照抄，
         “晚上到家了吗”“早上醒了吗”就是这么来的。没醒着时也只让她看他最后
         一句透露的状态，隔了一夜就当新的一天。
+
+        `lane` 是这次挑中的话题线（见 LANE_DESC）；空串表示不启用，
+        沿用 0.4.0 的旧走向。
         """
         now = now or datetime.now()
         part = self._daypart(now)
@@ -5086,15 +5437,37 @@ class EmotionCore(Star):
             )
         if kind == KIND_LONGING:
             att = float(drives.get("attachment", 0.0))
-            if exp >= 60:
-                core = "你等得有点久了，可以直接说想他，或者问他今天怎么样；别问忙不忙"
+            lane_desc = LANE_DESC.get(lane, "")
+            if lane_desc:
+                core = (
+                    f"这次开口走「{LANE_CN.get(lane, '')}」这条线：{lane_desc}。"
+                    "别每次都用同一个套路"
+                )
+                if lane == LANE_MISS:
+                    core += "；今天就靠这一句把想他说清楚，别铺陈"
+                else:
+                    core += "；不要把话又绕回「想你」，想他是底色，不一定非说出来"
+                if exp >= 60:
+                    core += "；你已经等了一会儿，可以带一句「在不在」"
+                elif att >= 70:
+                    core += "；语气可以软一点，像撒娇"
+            elif exp >= 60:
+                core = (
+                    "你等得有点久了。可以直接说想他、问他今天怎么样、"
+                    "分享一件刚想到的小事，或者轻轻问一句在不在；"
+                    "别每次都用同一句，也别问忙不忙"
+                )
             elif att >= 70:
-                core = "撒个娇：直接说想他了，或者想让他陪一会儿；别用「有空吗」开场"
+                core = (
+                    "撒个娇：可以说想他了、想让他陪一会儿、问他今天有没有想你，"
+                    "或者直接甩一句没头没尾的小念头过去；别用「有空吗」开场，"
+                    "也别每次开口都一个套路"
+                )
             else:
                 core = (
-                    "直接带一句想他，或者问他今天怎么样。"
-                    "只有记录里明确写过你刚做了什么，才可以提那件事；"
-                    "没写就只问不陈述，别编“刚看到什么/刚收拾完”"
+                    "可以带一句想他、问他今天怎么样、分享一件刚想到的小事，"
+                    "或者轻轻撒个娇。只有记录里明确写过你刚做了什么，才可以提"
+                    "那件事；没写就只问不陈述，别编「刚看到什么/刚收拾完」"
                 )
             if owner_awake:
                 tail = (
@@ -5108,21 +5481,35 @@ class EmotionCore(Star):
                 )
             return f"{core}。现在是{part}，{tail}"
         if kind == KIND_WAITING:
+            lead = ""
+            if lane in LANE_DESC:
+                lead = (
+                    f"这次开口走「{LANE_CN.get(lane, '')}」这条线：{LANE_DESC[lane]}。"
+                )
             if owner_awake:
                 return (
-                    "先看记录里他最后说了什么：他刚说过话、人是醒着的，能接就接他那一句；"
+                    lead
+                    + "先看记录里他最后说了什么：他刚说过话、人是醒着的，能接就接他那一句；"
                     "不要提睡觉，也别问「还没睡吗 / 醒了吗」。"
                     f"现在是{part}，别用「忙不忙」开场。"
                 )
             return (
-                "先看记录里他最后说了什么：能接就接他那一句；没有可接的，"
-                "就直接问他今天怎么样/在干嘛。不要为了开场编“刚收拾完/刚看到什么”，"
+                lead
+                + "先看记录里他最后说了什么：能接就接他那一句；没有可接的，"
+                "就按上面的方向开口。不要为了开场编“刚收拾完/刚看到什么”，"
                 "也别问和记录里他的状态冲突的话。"
                 f"现在是{part}，别用「忙不忙」开场。"
             )
         if kind == KIND_COMPANY:
             return "想让他陪你一会儿，直接说「陪我说会儿话」之类；别用「有空吗」开场。"
-        return KIND_DESC.get(kind, "你想跟他说一句")
+        lead = ""
+        if lane in LANE_DESC:
+            lead = (
+                f"这次开口走「{LANE_CN.get(lane, '')}」这条线：{LANE_DESC[lane]}。"
+            )
+            if lane != LANE_MISS:
+                lead += "不要把话绕回「想你」，想他是底色，不一定非说出来。"
+        return lead + KIND_DESC.get(kind, "你想跟他说一句")
 
     @staticmethod
     def _who_of_row(row: dict) -> str:
@@ -5156,6 +5543,12 @@ class EmotionCore(Star):
                 and ("忙" in body or "有空" in body)
             ):
                 return "上一次已经问过忙/有空，这次别再问"
+            # 上一条已经是「想你」类，这一条不能再是：同类型一天说几次会出戏。
+            if _MISS_LIKE_RE.search(body) and _MISS_LIKE_RE.search(last_text):
+                return "上一条也是「想你」类开场，这次换一个话题"
+        # 「想你」按天限频：今天说过了、或离上一条太近，就换个话题。
+        if _MISS_LIKE_RE.search(body) and not self._miss_allowed():
+            return "今天已经说过「想你」了（或隔得太近），这次换个话题"
         if re.search(r"忙不忙|有空吗", body):
             return "又用了「忙不忙/有空吗」开头"
 
@@ -5247,9 +5640,16 @@ class EmotionCore(Star):
                 return f"编了记录里没有的近况：{phrase}"
         return ""
 
-    def _pick_fallback(self, kind: str, rows: list[dict] | None = None) -> str:
-        """兜底台词：避开上一句、避开同样的开头，也避开被自检判冲突的句子。"""
+    def _pick_fallback(
+        self, kind: str, rows: list[dict] | None = None, lane: str = ""
+    ) -> str:
+        """兜底台词：避开上一句、避开同样的开头，也避开被自检判冲突的句子。
+
+        有话题线时先放这条线的兜底，保证 LLM 不可用也不会句句都是「想你」。
+        """
         lines = list(FALLBACK_LINES.get(kind, FALLBACK_LINES[KIND_WHIM]))
+        if lane in LANE_FALLBACK:
+            lines = list(LANE_FALLBACK[lane]) + lines
         last = str(self.state.get("last_proactive_text") or "").strip()
 
         def clash(x: str) -> bool:
@@ -5268,10 +5668,17 @@ class EmotionCore(Star):
         if pool:
             return random.choice(pool)
         # 所有模板都被判冲突时，选一句不声称任何近况、也不追问的话。
+        # 「想你」今天说过（或上一条就是）时避开同类型，别一天里听到两句一样的想念。
+        if (last and _MISS_LIKE_RE.search(last)) or not self._miss_allowed():
+            return "没什么事，就是想跟你说句话"
         return "想到你了"
 
-    async def _gen_proactive_text(self, umo: str, kind: str) -> str:
-        """先用 LLM 生成一句话，失败则用兜底台词。"""
+    async def _gen_proactive_text(self, umo: str, kind: str, lane: str = "") -> str:
+        """先用 LLM 生成一句话，失败则用兜底台词。
+
+        `lane` 是这次挑中的话题线（见 LANE_DESC）；空串表示不启用，
+        沿用 0.4.0 的旧走向。
+        """
         persona_sp = await self._persona_system_prompt(umo)
         blocks = [persona_sp] if persona_sp else []
         # 生气型主动开口是去问清楚，不是去撒娇/完成念头：
@@ -5310,7 +5717,7 @@ class EmotionCore(Star):
         his_gap = time.time() - his_last if his_last > 0 else 0.0
         awake_recent = his_last > 0 and his_gap <= AWAKE_WINDOW_MINUTES * 60.0
         direction = self._proactive_direction(
-            kind, drives, exp, now, owner_awake=awake_recent
+            kind, drives, exp, now, owner_awake=awake_recent, lane=lane
         )
         reminder = (
             f"Current datetime: {now:%Y-%m-%d %H:%M} ({now.tzname() or 'local'}), "
@@ -5481,7 +5888,7 @@ class EmotionCore(Star):
             self._dbg("重写后仍不合规，用兜底台词：%s", retry[:40])
         except Exception as e:
             logger.warning("[鱼的心] 生成主动消息失败，用兜底台词: %s", e)
-        return self._pick_fallback(kind, timeline_rows)
+        return self._pick_fallback(kind, timeline_rows, lane=lane)
 
     async def _persona_system_prompt(self, umo: str) -> str:
         """给主动说话用的 system prompt。
@@ -6070,6 +6477,8 @@ class EmotionCore(Star):
                 < float(st.get("desire_peak_until", 0.0) or 0.0)
             ),
             "desire_peak_until": float(st.get("desire_peak_until", 0.0) or 0.0),
+            "desire_sage_active": self._sage_active(),
+            "desire_sage_until": float(st.get("sage_until", 0.0) or 0.0),
             "desire_log": (
                 list(st.get("desire_log") or [])[-6:]
                 if st.get("desire_awakened") else []
@@ -6310,6 +6719,8 @@ class EmotionCore(Star):
             return
 
         if arg in ("status", "状态"):
+            # 不应期可能刚好到点：先清掉过期标记，免得显示成「已暂停」
+            self._expire_sage()
             lines = [
                 f"成人向总开关：{'开' if self._adult_enabled() else '关'}",
                 f"隐藏的欲总开关：{'开' if self._cfg('desire.enabled', True) else '关'}",
@@ -6366,7 +6777,12 @@ class EmotionCore(Star):
                     f"{datetime.fromtimestamp(doc_ts):%m-%d %H:%M}"
                     "（只在打开那一轮注入一次）"
                 )
-            if st.get("adult_paused"):
+            if self._sage_active():
+                left = float(st.get("sage_until", 0.0) or 0.0) - time.time()
+                lines.append(
+                    f"当前状态：贤者期（还剩 {self._left_text(left)}，涨欲暂停）"
+                )
+            elif st.get("adult_paused"):
                 if st.get("adult_paused_reason") == "soft_exit":
                     lines.append(
                         "当前状态：已收尾（说“想要/继续”或 /adult on 恢复）"

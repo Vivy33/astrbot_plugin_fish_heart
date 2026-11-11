@@ -433,7 +433,7 @@
   const DIM_CN = {
     attachment: "依恋", curiosity: "好奇", reflection: "反刍", duty: "责任",
     social: "社交", fatigue: "疲惫", intimacy: "亲密", stress: "压力",
-    joy: "喜悦", blame: "责怪", expectation: "期待",
+    joy: "喜悦", blame: "责怪", expectation: "期待", desire: "欲",
   };
 
   function renderDesire(d) {
