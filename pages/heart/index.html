@@ -20,6 +20,7 @@
       <div class="brand-text">
         <h1>鱼的心</h1>
         <p class="sub" id="subtitle">正在读取她的心境…</p>
+        <div class="special-strip" id="specialStrip" hidden></div>
       </div>
     </div>
     <div class="topbar-right">
@@ -70,7 +71,12 @@
     <div class="card-head"><h2>念头</h2><span class="hint" id="thoughtCount">0 条</span></div>
     <ul class="thought-list" id="thoughtList"></ul>
     <p class="empty" id="thoughtEmpty">她这会儿什么都没惦记。</p>
-    <div class="card-head sub-head"><h3>最近的变化</h3><span class="hint" id="eventHint">她为什么变</span></div>
+    <div id="promiseWrap" hidden>
+      <div class="card-head sub-head"><h3>小约定</h3><span class="hint" id="promiseHint">心里记着</span></div>
+      <ul class="promise-list" id="promiseList"></ul>
+    </div>
+    <div class="card-head sub-head"><h3>最近的变化</h3><span class="hint" id="eventHint">最新在上</span></div>
+    <div class="event-cols" id="eventCols" hidden><span>原因</span><span>数值变化</span><span>时间</span></div>
     <ul class="event-list" id="eventList"></ul>
     <p class="empty" id="eventEmpty">还没有记录到变化。</p>
   </section>

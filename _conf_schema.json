@@ -130,11 +130,40 @@
         "default": 10,
         "hint": "只按私聊算，群里别人聊天不会推迟她找你。"
       },
+      "schedule_mode": {
+        "type": "string",
+        "description": "主动开口时机策略",
+        "default": "none",
+        "options": [
+          "none",
+          "daily_guarantee",
+          "fixed_window"
+        ],
+        "labels": [
+          "默认（全天随机，不兜底）",
+          "睡前兜底（全天随机 + 睡前 30 分钟内保底一次）",
+          "固定时间段（仅在下方指定时间段内主动开口）"
+        ],
+        "hint": "「睡前兜底」与「固定时间段」二选一。白天上学或上班看不了手机时建议选「固定时间段」：窗口外绝不主动发消息（含开机补发），避免无人回复导致沉默加反刍；窗口结束前 30 分钟内若当天尚未开口，会保底尝试一次。"
+      },
+      "window_start": {
+        "type": "string",
+        "description": "固定时间段 · 开始时间",
+        "default": "18:00",
+        "hint": "HH:MM（本地时间），仅「固定时间段」模式生效。支持跨零点（例如 21:00 到 01:00）。"
+      },
+      "window_end": {
+        "type": "string",
+        "description": "固定时间段 · 结束时间",
+        "default": "22:00",
+        "hint": "HH:MM（本地时间），仅「固定时间段」模式生效。"
+      },
       "daily_guarantee": {
         "type": "bool",
-        "description": "睡前兜底：每天至少主动说一次",
+        "description": "睡前兜底（旧键，已由「主动开口时机策略」接管）",
         "default": false,
-        "hint": "开启后，当天还没主动说过话时，在她睡前 30 分钟起跳过随机概率，必定尝试一次。睡着、回避档、目标会话没配好、刚聊过 10 分钟内仍会挡住——条件解除且还在睡前窗口内才补发；群里一直有人说话时，因“刚聊过不打扰”仍会挡住，保底可能发不出。没有开启作息（sleep.enabled=false）时，当天第一次心跳就补。一天只保证一条，成功后恢复原来的随机节奏。"
+        "invisible": true,
+        "hint": "旧版布尔开关，保留用于平滑迁移；请直接修改上方的「主动开口时机策略」。"
       },
       "catch_up_on_start": {
         "type": "bool",
@@ -155,6 +184,27 @@
         "default": 1,
         "invisible": true,
         "hint": "只在「主动开口换着话题说」开启时生效：她主动说「想你」一天最多这么多次（默认 1 次），两次之间至少还要隔 8 小时。说满后这天再开口会换别的说法；发消息前自检也会拦下这一天里第二句「想你」。填 0 等于当天不再单独说想你。"
+      },
+      "company": {
+        "type": "bool",
+        "description": "允许「求陪伴」主动动机",
+        "default": true,
+        "invisible": true,
+        "hint": "日常档且依恋/亲密达到黏人线、期待够高并惦记「陪一会儿」时触发；关掉后不再选该动机。"
+      },
+      "deep": {
+        "type": "bool",
+        "description": "允许「走心」主动动机",
+        "default": true,
+        "invisible": true,
+        "hint": "日常档且反刍/依恋较高、不累并惦记「关于我们的事」时触发；关掉后不再选该动机。"
+      },
+      "segment_reply": {
+        "type": "bool",
+        "description": "主动消息多句拆条发送",
+        "default": true,
+        "invisible": true,
+        "hint": "默认固定开启，把多句主动消息拆成 2–4 条间隔发出；配置页不展示，如需关闭可直接在配置 JSON 中设为 false。"
       }
     }
   },
@@ -431,6 +481,96 @@
         "default": false,
         "hint": "打开后，如果本场景出现过明确成人邀请（想要你/想亲你等）、且场景持续够久，「晚安 / 睡觉吧 / 抱一会儿就好」也按完成处理，进贤者期。纯抱抱、纯聊天的晚安仍然只收尾。默认关，避免升级后行为突变。",
         "invisible": true
+      }
+    }
+  },
+  "special_days": {
+    "type": "object",
+    "description": "🎂 特别的日子（生日与纪念日）",
+    "items": {
+      "enabled": {
+        "type": "bool",
+        "description": "启用生日与纪念日",
+        "default": true,
+        "hint": "打开后，她会记住你们的生日、相识纪念日和自定义特别日，提前悄悄惦记并在当天给出情绪反应与专属祝福；全留空时零影响、零消耗。"
+      },
+      "owner_birthday": {
+        "type": "string",
+        "description": "鱼主生日",
+        "default": "",
+        "hint": "填 MM-DD 或 YYYY-MM-DD（如 08-15 或 2004-08-15）；留空表示不设置。"
+      },
+      "fish_birthday": {
+        "type": "string",
+        "description": "鱼的生日",
+        "default": "",
+        "hint": "填 MM-DD 或 YYYY-MM-DD（如 03-21）；当天她会悄悄等你记起来，不会自己讨祝福。"
+      },
+      "met_date": {
+        "type": "string",
+        "description": "相识 / 在一起纪念日",
+        "default": "",
+        "hint": "填 YYYY-MM-DD（如 2025-05-20）会自动算相识第几天、周年日和整百/520天纪念；只填 MM-DD 则按每年纪念日算。"
+      },
+      "custom": {
+        "type": "list",
+        "description": "自定义特别日",
+        "default": [],
+        "hint": "每条写「日期 名称」，如 10-01 第一次见面 或 2026-06-07 高考；也可以在聊天里用 /心 纪念日 add 随时增删。"
+      },
+      "preheat_days": {
+        "type": "int",
+        "description": "提前惦记天数",
+        "default": 3,
+        "hint": "提前几天开始在心里悄悄惦记（0 = 只在当天反应，不提前预热）。"
+      },
+      "proactive_wish": {
+        "type": "bool",
+        "description": "当天主动发专属祝福",
+        "default": true,
+        "hint": "鱼主生日、纪念日或自定义特别日当天，在允许主动开口的时段内自动发一条专属祝福（鱼自己的生日不主动发，留给你记起来）。"
+      }
+    }
+  },
+  "daily_vibe": {
+    "type": "object",
+    "description": "🌤 每日小气象（心情底色）",
+    "items": {
+      "enabled": {
+        "type": "bool",
+        "description": "启用每日小气象",
+        "default": true,
+        "hint": "每天醒来按当前状态轻度加权掷一个当日心情底色（晴朗/微风/小云/微凉/薄雾/星火），微调说话味道；生气、回避、高压或高疲惫时自动隐身，0 额外后台消耗。"
+      }
+    }
+  },
+  "promises": {
+    "type": "object",
+    "description": "🤝 小约定（短期承诺挂念）",
+    "items": {
+      "enabled": {
+        "type": "bool",
+        "description": "启用小约定",
+        "default": true,
+        "hint": "记住你亲口说过的近期小承诺，过一阵顺嘴轻提，兑现后开心结算；最多挂几条且到期自动淡掉，不与记忆插件冲突。"
+      },
+      "auto_capture": {
+        "type": "bool",
+        "description": "私聊自动捕捉明确承诺",
+        "default": true,
+        "hint": "打开后，私聊里说「我答应你…」「说好了…」「周末带你去…」等明确承诺时自动记下（自动过滤问句与否定句）；关掉后只通过 /心 约定 add 手动记。"
+      },
+      "max_active": {
+        "type": "int",
+        "description": "最多同时挂念几条",
+        "default": 3,
+        "hint": "默认 3 条，超出时由新约定顶掉最旧的一条，保持轻巧不唠叨。"
+      },
+      "expire_days": {
+        "type": "int",
+        "description": "未兑现自动淡掉天数",
+        "default": 14,
+        "hint": "超过这么多天没兑现就自然放下，不再记挂（默认 14 天）。"
       }
     }
   },

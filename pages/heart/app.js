@@ -54,6 +54,16 @@
 
   const clamp100 = (v) => Math.max(0, Math.min(100, Number(v) || 0));
 
+  /** 把数值按满格线 dm 折算成 0–100 整数：
+   *  真实值不到满格线（如 79.7 < 80）时绝不进位到 100，
+   *  避免面板看着"100 满格"但后端 _desire_bond_full() 仍为 False 的错觉。 */
+  function normInt(val, dm) {
+    const v = clamp100(val);
+    const max = Number(dm) || 100;
+    if (v >= max) return 100;
+    return Math.min(99, Math.floor((v / max) * 100 + 1e-9));
+  }
+
   function fmtClock(ts) {
     if (!ts) return "—";
     const d = new Date(Number(ts) * 1000);
@@ -178,13 +188,14 @@
       const val = k === "__exp" ? d.expectation : k === "__blame" ? d.blame : d.drives[k];
       const dm = k in (d.display_max || {}) ? Number(d.display_max[k]) : 100;
       const pct = Math.min(100, (clamp100(val) / dm) * 100);
+      const shown = normInt(val, dm);
       // 里程碑刻度线：依恋/亲密在「黏人」门槛处标一道，满了才叫满格
       const tickVal = Number((d.display_tick && d.display_tick[k]) || 0);
       const wrap = document.createElement("div");
       wrap.className = "ring";
       wrap.title = dm === 100
-        ? `${cn}：${Math.round(clamp100(val))}`
-        : `${cn}：真实 ${Math.round(clamp100(val))}（按 ${dm} 归一成 ${Math.round(pct)}）`
+        ? `${cn}：${shown}`
+        : `${cn}：真实 ${clamp100(val).toFixed(1)}（按 ${dm} 归一成 ${shown}）`
           + (tickVal > 0 ? `｜刻度线 = ${tickVal}（黏人门槛）` : "");
       const dial = document.createElement("div");
       dial.className = "dial";
@@ -196,8 +207,8 @@
         requestAnimationFrame(() => tick.style.setProperty("--t", tpct));
       }
       const b = document.createElement("b");
-      // 归一化：依恋/亲密按 display_max 映射到 0-100 显示
-      b.textContent = Math.round(pct);
+      // 归一化：依恋/亲密按 display_max 映射到 0-100 显示（向下取整，避免 79.7 显示 100）
+      b.textContent = shown;
       dial.appendChild(b);
       const cap = document.createElement("div");
       cap.className = "cap";
@@ -222,10 +233,11 @@
       const v = clamp100(d.drives[k]);
       const dm = k in (d.display_max || {}) ? Number(d.display_max[k]) : 100;
       const pct = Math.min(100, (v / dm) * 100);
+      const shown = normInt(v, dm);
       const row = document.createElement("div");
       row.className = "meter";
-      row.innerHTML = `<span class="name">${cn}</span><span class="bar"><i></i></span><span class="val">${Math.round(pct)}</span>`;
-      row.title = dm === 100 ? `${cn}：${Math.round(v)}` : `${cn}：真实 ${Math.round(v)}（按 ${dm} 归一）`;
+      row.innerHTML = `<span class="name">${cn}</span><span class="bar"><i></i></span><span class="val">${shown}</span>`;
+      row.title = dm === 100 ? `${cn}：${shown}` : `${cn}：真实 ${v.toFixed(1)}（按 ${dm} 归一成 ${shown}）`;
       mbox.appendChild(row);
       requestAnimationFrame(() => { row.querySelector("i").style.width = `${pct}%`; });
     });
@@ -326,6 +338,10 @@
     const proactiveOn = !!d.enabled && cfg.proactive_enabled !== false;
     const limit = Math.max(0, Number(cfg.daily_limit ?? 0) || 0);
     const count = Number(d.proactive_count || 0);
+    const outOfWindow =
+      cfg.schedule_mode === "fixed_window"
+      && cfg.fixed_window_valid
+      && cfg.in_fixed_window === false;
 
     $("pCount").textContent = `${count}/${cfg.daily_limit ?? "?"}`;
     $("pCooldown").textContent = !proactiveOn
@@ -334,11 +350,13 @@
         ? "睡眠中"
         : (d.mode === "shut"
           ? "回避中"
-          : (!limit
-            ? "无额度"
-            : (count >= limit
-              ? "今日已满"
-              : (last ? (remain > 0 ? fmtSpan(remain) : "可开口") : "可开口")))));
+          : (outOfWindow
+            ? "未到时段"
+            : (!limit
+              ? "无额度"
+              : (count >= limit
+                ? "今日已满"
+                : (last ? (remain > 0 ? fmtSpan(remain) : "可开口") : "可开口"))))));
     $("pLast").textContent = fmtAgo(last);
     $("pWaiting").textContent = d.awaiting_reply ? "是" : "否";
 
@@ -352,6 +370,9 @@
     const chips = [
       ["冷却", `${cfg.cooldown_hours}h`],
       ["每日上限", `${cfg.daily_limit}`],
+      ["主动时机", cfg.schedule_mode === "fixed_window"
+        ? `时段 ${cfg.window_start || "18:00"}-${cfg.window_end || "22:00"}`
+        : (cfg.schedule_mode === "daily_guarantee" ? "睡前兜底" : "全天随机")],
       ["刚聊过不打扰", `${cfg.min_idle_minutes}min`],
       ["作息", d.sleep?.enabled
         ? (d.sleep.asleep
@@ -392,6 +413,8 @@
       readiness = `她睡着了（${d.sleep.bedtime}-${d.sleep.wake}${d.sleep.stay_up ? "，今晚熬夜" : ""}），${d.sleep.wake} 之后才可能开口。`;
     } else if (!proactiveOn) {
       readiness = "主动说话已关闭；你说话她会回，但不会主动开口。";
+    } else if (outOfWindow) {
+      readiness = `当前不在固定主动时段（${cfg.window_start || "18:00"}-${cfg.window_end || "22:00"}）内，到了时间段才会主动开口。`;
     } else if (d.mode === "angry") {
       const who = topAngerTarget(d.anger_targets);
       const base = `她在生气${who ? `（对 ${who.label}）` : ""}：还会回你`;
@@ -429,6 +452,20 @@
       .trim();
   }
 
+  /** 把 AstrBot 附带的 <quoted_message sender="...">...</quoted_message> 拆成引用 + 正文 */
+  function splitQuote(s) {
+    const raw = String(s || "");
+    const m = raw.match(
+      /<quoted_message(?:\s+sender="([^"]*)")?\s*>([\s\S]*?)(?:<\/quoted_message>|$)/i,
+    );
+    if (!m) return { quote: "", text: stripMarks(raw) };
+    const sender = (m[1] || "").trim();
+    const qBody = stripMarks(m[2] || "");
+    const rest = stripMarks(raw.slice(0, m.index) + " " + raw.slice(m.index + m[0].length));
+    const quote = qBody ? (sender ? `回复 ${sender}：${qBody}` : `回复：${qBody}`) : "";
+    return { quote, text: rest };
+  }
+
   /** 把「最近的变化」渲染成一行行：事件名 + 主要增量 + 时间 */
   const DIM_CN = {
     attachment: "依恋", curiosity: "好奇", reflection: "反刍", duty: "责任",
@@ -443,11 +480,12 @@
     if (!on) return;
 
     const value = clamp100(d.desire);
-    $("desireValue").textContent = Math.round(value);
+    $("desireValue").textContent = normInt(value, 100);
     $("desireStage").textContent = d.desire_stage || "";
     $("desireFill").style.width = `${value}%`;
     const status = [];
     if (d.desire_adult_status) status.push(d.desire_adult_status);
+    if (d.desire_unsatisfied) status.push("欲求不满 · 想主动推倒你");
     if (d.desire_bond_full === false) status.push("关系未满，正在退潮");
     if (d.desire_satiated) status.push("饱和中 · 收益减半");
     $("desireStatus").textContent = status.join(" · ");
@@ -476,40 +514,122 @@
     });
   }
 
+  /** 合并相邻的普通「说话」事件（30 分钟内），避免连聊几句刷满整张表 */
+  function groupRecentEvents(list) {
+    const rev = [...(list || [])].reverse();
+    const out = [];
+    rev.forEach((e) => {
+      if (!e) return;
+      const isChat = (e.n === "user_msg" || e.cn === "说话");
+      const prev = out[out.length - 1];
+      if (
+        isChat
+        && prev
+        && prev._isChat
+        && Math.abs(Number(prev.ts || 0) - Number(e.ts || 0)) <= 1800
+      ) {
+        prev._count += 1;
+        Object.entries(e.d || {}).forEach(([k, v]) => {
+          prev._sum[k] = (prev._sum[k] || 0) + Number(v || 0);
+        });
+        return;
+      }
+      const sum = {};
+      Object.entries(e.d || {}).forEach(([k, v]) => {
+        sum[k] = Number(v || 0);
+      });
+      out.push({
+        n: e.n || "",
+        cn: e.cn || e.n || "",
+        ts: Number(e.ts || 0),
+        _isChat: isChat,
+        _count: 1,
+        _sum: sum,
+      });
+    });
+    return out;
+  }
+
+  const NEG_DIMS = new Set(["stress", "fatigue", "blame"]);
+
   function renderEvents(list) {
     const ul = $("eventList");
     ul.replaceChildren();
-    $("eventEmpty").hidden = list.length > 0;
-    [...list].reverse().forEach((e) => {
-      const parts = Object.entries(e.d || {})
-        .map(([k, v]) => `${DIM_CN[k] || k} ${v > 0 ? "+" : ""}${v}`)
-        .join(" · ");
+    const rows = groupRecentEvents(list);
+    const cols = $("eventCols");
+    if (cols) cols.hidden = rows.length === 0;
+    $("eventEmpty").hidden = rows.length > 0;
+    rows.forEach((e) => {
+      const entries = Object.entries(e._sum)
+        .map(([k, v]) => [k, Math.round(v * 10) / 10])
+        .filter(([, v]) => v !== 0)
+        .sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]))
+        .slice(0, 3);
       const li = document.createElement("li");
-      li.innerHTML = `<span class="ev-name"></span><span class="ev-delta"></span><span class="ev-time"></span>`;
-      li.querySelector(".ev-name").textContent = e.cn || e.n || "";
-      li.querySelector(".ev-delta").textContent = parts;
-      li.querySelector(".ev-time").textContent = e.ts ? fmtAgo(e.ts) : "";
+      const nameEl = document.createElement("span");
+      nameEl.className = "ev-name";
+      const label = e._count > 1 ? `${e.cn} ×${e._count}` : e.cn;
+      nameEl.textContent = label;
+      nameEl.title = label;
+
+      const deltaEl = document.createElement("span");
+      deltaEl.className = "ev-delta";
+      const plainParts = [];
+      entries.forEach(([k, v], idx) => {
+        if (idx > 0) deltaEl.append(" · ");
+        const txt = `${DIM_CN[k] || k} ${v > 0 ? "+" : ""}${v}`;
+        plainParts.push(txt);
+        const chip = document.createElement("em");
+        const isWarn = NEG_DIMS.has(k) ? v > 0 : v < 0;
+        chip.className = isWarn ? "ev-neg" : "ev-pos";
+        chip.textContent = txt;
+        deltaEl.appendChild(chip);
+      });
+      deltaEl.title = plainParts.join(" · ");
+
+      const timeEl = document.createElement("span");
+      timeEl.className = "ev-time";
+      timeEl.textContent = e.ts ? fmtAgo(e.ts) : "";
+      li.append(nameEl, deltaEl, timeEl);
       ul.appendChild(li);
     });
+    ul.scrollTop = 0;
   }
   function renderRecent(list, fromHistory) {
     const ol = $("recent");
     ol.replaceChildren();
-    $("recentHint").textContent = fromHistory ? "来自对话历史" : "只记私聊";
+    $("recentHint").textContent = fromHistory ? "最新在上 · 来自对话历史" : "最新在上 · 只记私聊";
 
     let shown = 0;
-    list.forEach((m) => {
-      const text = stripMarks(m.t);
-      if (!text) return; // 纯图片 / 纯标记的一行不显示
+    // 最新对话置顶，打开面板就能直接看到刚说过的话（与「最近的变化」「最近涨落」同序）
+    [...list].reverse().forEach((m) => {
+      const { quote, text } = splitQuote(m.t);
+      if (!text && !quote) return; // 纯图片 / 纯标记的一行不显示
       const li = document.createElement("li");
       li.dataset.who = m.r === "bot" ? "bot" : "user";
       // 对话历史里没有时间戳，用"此前"占位，避免显示 1970
       const when = m.ts ? fmtAgo(m.ts) : "此前";
-      li.innerHTML = `<span class="who">${m.r === "bot" ? "她" : "你"} · ${when}</span><span class="what"></span>`;
-      li.querySelector(".what").textContent = text;
+      const who = document.createElement("span");
+      who.className = "who";
+      who.textContent = `${m.r === "bot" ? "她" : "你"} · ${when}`;
+      li.appendChild(who);
+      if (quote) {
+        const qEl = document.createElement("span");
+        qEl.className = "quote";
+        qEl.textContent = quote;
+        qEl.title = quote;
+        li.appendChild(qEl);
+      }
+      if (text) {
+        const what = document.createElement("span");
+        what.className = "what";
+        what.textContent = text;
+        li.appendChild(what);
+      }
       ol.appendChild(li);
       shown += 1;
     });
+    ol.scrollTop = 0;
     $("recentEmpty").hidden = shown > 0;
   }
 
@@ -612,7 +732,7 @@
     DRIVE_ORDER.forEach((k) => {
       const v = Number((d.drives || {})[k]) || 0;
       const dm = Number((d.display_max || {})[k]) || 100;
-      const pct = Math.round(Math.min(100, (v / dm) * 100));
+      const pct = normInt(v, dm);
       const s = document.createElement("span");
       s.innerHTML = `<i></i><em></em> <b>${pct}</b>`;
       s.querySelector("em").textContent =
@@ -637,6 +757,80 @@
     }
   }
 
+  function renderSpecialDays(sd, vibe) {
+    const box = $("specialStrip");
+    if (!box) return;
+    box.replaceChildren();
+    const pills = [];
+    if (vibe && vibe.enabled && vibe.label) {
+      const tip = (vibe.hint || "") + (vibe.suppressed ? "（当前情绪或压力下暂隐身）" : "");
+      pills.push({
+        text: `今日气象 · ${vibe.label}`,
+        cls: vibe.suppressed ? "special-pill vibe muted" : "special-pill vibe",
+        title: tip,
+      });
+    }
+    if (sd && sd.enabled && sd.has_any) {
+      const metDays = Number(sd.met_days || 0);
+      if (metDays > 0) {
+        pills.push({ text: `相识第 ${metDays} 天`, cls: "special-pill", title: sd.met_date ? `自 ${sd.met_date} 起` : "" });
+      }
+      const todayItems = Array.isArray(sd.today_items) ? sd.today_items : [];
+      if (todayItems.length) {
+        todayItems.slice(0, 2).forEach((it) => {
+          const name = String(it.name || "");
+          const label = name.startsWith("相识") ? `今天 · ${name}` : `今天是 ${name}`;
+          pills.push({ text: label, cls: "special-pill today", title: it.date ? `日期：${it.date}` : "" });
+        });
+      } else if (sd.nearest && sd.nearest.name) {
+        const left = Number(sd.nearest.days_left || 0);
+        pills.push({
+          text: `距 ${sd.nearest.name} 还有 ${left} 天`,
+          cls: "special-pill",
+          title: sd.nearest.date ? `日期：${sd.nearest.date}` : "",
+        });
+      }
+    }
+    if (!pills.length) {
+      box.hidden = true;
+      return;
+    }
+    pills.forEach((p) => {
+      const span = document.createElement("span");
+      span.className = p.cls || "special-pill";
+      span.textContent = p.text;
+      if (p.title) span.title = p.title;
+      box.appendChild(span);
+    });
+    box.hidden = false;
+  }
+
+  function renderPromises(rows, enabled) {
+    const wrap = $("promiseWrap");
+    const list = $("promiseList");
+    if (!wrap || !list) return;
+    list.replaceChildren();
+    if (!enabled || !Array.isArray(rows) || !rows.length) {
+      wrap.hidden = true;
+      return;
+    }
+    const hint = $("promiseHint");
+    if (hint) hint.textContent = `${rows.length} 条`;
+    rows.forEach((r) => {
+      const li = document.createElement("li");
+      li.className = "promise-item";
+      const txt = document.createElement("span");
+      txt.className = "promise-text";
+      txt.textContent = String(r.text || "");
+      const age = document.createElement("span");
+      age.className = "promise-age";
+      age.textContent = fmtAgo(r.ts) + (r.src === "auto" ? " · 自动记住" : "");
+      li.append(txt, age);
+      list.appendChild(li);
+    });
+    wrap.hidden = false;
+  }
+
   function render(d) {
     applyMode(d.mode, d.mind_knot, d.anger_targets, d.mode_tag_cn);
     document.body.dataset.mode = d.mode;
@@ -649,6 +843,7 @@
     $("subtitle").textContent =
       `${ver}期待 ${Math.round(d.expectation)} · 责怪 ${Math.round(d.blame)}`;
     $("tickHint").textContent = `心跳 ${fmtAgo(d.last_tick)}`;
+    guard("特别的日子", () => renderSpecialDays(d.special_days, d.daily_vibe));
 
     const hint = d.hint || "";
     let blameText = "";
@@ -668,6 +863,7 @@
       renderThoughts(d.thoughts || [], d.recent_rewards || [],
         d.settle_cooldown_left, d.last_let_go);
     });
+    guard("小约定", () => renderPromises(d.promises || [], d.promises_enabled));
     guard("主动说话", () => renderProactive(d));
     // recent 全是单边（历史遗留）时，改用 AstrBot 的真实对话历史
     const recent = Array.isArray(d.recent) ? d.recent : [];
@@ -766,6 +962,12 @@
         toast("她睡着了，这次只跳了心跳");
       } else if (res && res.data && res.data.mode === "shut") {
         toast("她在回避，主动说话被冻结，这次只跳了心跳");
+      } else if (
+        cfg.schedule_mode === "fixed_window"
+        && cfg.fixed_window_valid
+        && cfg.in_fixed_window === false
+      ) {
+        toast(`当前不在固定主动时段（${cfg.window_start || "18:00"}-${cfg.window_end || "22:00"}）内，这次只跳了心跳`);
       } else {
         toast(sent ? "她刚开口了，去看看消息" : "这次没开口（概率/冷却/目标会话格式，详情看日志）");
       }

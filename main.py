@@ -15,12 +15,13 @@
    的成品消息），不伪造 event 去骗管线。
 5. **兜底优先**：任何外部依赖（LLM / TTS / 会话历史）失败都只降级、不抛错。
 
-作者: LLL   版本: 1.0.0   许可: MIT
+作者: LLL   许可: MIT（当前版本见下方 VERSION）
 """
 
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import os
 import random
@@ -59,6 +60,55 @@ def _load_thought_engine():
 
 
 engine = _load_thought_engine()
+
+
+def _load_special_days():
+    """特别的日子（生日与纪念日）同目录纯函数模块；加载失败不影响本体。"""
+    try:
+        import importlib.util as _ilu
+        _p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "special_days.py")
+        _spec = _ilu.spec_from_file_location("astrbot_plugin_fish_heart_special_days", _p)
+        _mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        return _mod
+    except Exception as _e:
+        logger.warning("[鱼的心] 特别的日子模块加载失败: %s", _e)
+        return None
+
+
+special_days_mod = _load_special_days()
+
+
+def _load_daily_vibe():
+    """每日小气象（心情底色）同目录纯函数模块；加载失败不影响本体。"""
+    try:
+        import importlib.util as _ilu
+        _p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "daily_vibe.py")
+        _spec = _ilu.spec_from_file_location("astrbot_plugin_fish_heart_daily_vibe", _p)
+        _mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        return _mod
+    except Exception as _e:
+        logger.warning("[鱼的心] 每日小气象模块加载失败: %s", _e)
+        return None
+
+
+def _load_promises():
+    """小约定（短期承诺挂念）同目录纯函数模块；加载失败不影响本体。"""
+    try:
+        import importlib.util as _ilu
+        _p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "promises.py")
+        _spec = _ilu.spec_from_file_location("astrbot_plugin_fish_heart_promises", _p)
+        _mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        return _mod
+    except Exception as _e:
+        logger.warning("[鱼的心] 小约定模块加载失败: %s", _e)
+        return None
+
+
+daily_vibe_mod = _load_daily_vibe()
+promises_mod = _load_promises()
 
 
 def _migrate_thoughts(raw: list) -> list:
@@ -116,7 +166,7 @@ def _thought_summary(thoughts: list) -> list:
 
 
 PLUGIN_NAME = "astrbot_plugin_fish_heart"
-VERSION = "0.4.1"
+VERSION = "0.4.2"
 
 # 注入钩子优先级：AstrBot 按优先级 **降序** 执行。
 # 天使之心 = 40，TTS = 0，这里用 -10 表示最后一个执行（只追加、不覆盖）。
@@ -252,6 +302,10 @@ DIM_DISPLAY_MAX = {
 # 这样"黏人"是个里程碑，不是满格（满格留给 80 那种长期亲密）。
 BOND_INTIMATE_AT = 66.0
 BOND_CLOSE_AT = 62.0
+# 期待值到达该线后进入「着急」心情（1 次主动开口 +40 不着急，连续未回 ≥60 才着急）
+EXP_ANXIOUS_AT = 60.0
+# 非秒回/非晚安的私聊回话，本轮带着急心境回应后再温和回落期待，避免回来后一直卡在着急
+EXP_REPLY_RELIEF = 40.0
 DIM_DISPLAY_TICK = {
     "attachment": BOND_INTIMATE_AT,
     "intimacy": BOND_INTIMATE_AT,
@@ -260,6 +314,8 @@ DIM_DISPLAY_TICK = {
 # 隐藏的「欲」：只有依恋、亲密都满格并持续一段时间才解锁。
 # 显示满格线改成 80，和这里的解锁门槛一致：两条都满才解锁。
 DESIRE_ADULT_AT = 60.0          # 成人层开始参与的欲阈值
+DESIRE_UNSATISFIED_AT = 100.0   # 欲触顶进入「欲求不满」状态
+DESIRE_UNSATISFIED_EXIT = 85.0  # 迟滞退出线：避免饱和期心跳 100 → 99.98 一跳就闪退
 DESIRE_UNLOCK_BASE = 15.0       # 刚解锁时不是 100
 DESIRE_BUILD_PER_TICK = 0.16    # 关系满格时每个心跳的缓慢积累
 DESIRE_DECAY_PER_TICK = 0.10    # 没互动时的自然回落
@@ -415,6 +471,8 @@ MODE_HINT = {
 MOOD_HINT = {
     "紧绷": "现在有点绷着，话短一点，别主动找话题",
     "累了": "有点累，别揽太长的活，话可以少一点",
+    "着急": "等他回话等得有点着急，心里坐不太住；可以带一点急切、惦记或轻声确认的口气"
+            "（别演成审问或发火），他一回话就会明显松一口气",
     "黏人": "这会儿特别想黏着他，语气可以更软、也可以更主动。"
             "黏人不止「想你」一种说法：问问他今天有什么好玩的、说说你心里刚冒出来的小事、"
             "要他陪你一会儿、或者只是应他一声；「想你」一天说一次就够，"
@@ -431,6 +489,7 @@ MOOD_HINT = {
 MOOD_BRIEF = {
     "紧绷": "有点绷着",
     "累了": "有点累",
+    "着急": "等得有点着急，总忍不住看手机",
     "黏人": "这会儿特别想黏着他",
     "想亲近": "想再靠近一点",
     "开心": "心情不错",
@@ -541,6 +600,7 @@ PET_NAMES = ("小笨蛋", "小笨鱼", "笨鱼", "笨笨鱼", "笨蛋鱼", "小�
              "小傻鱼", "傻鱼", "小傻子", "笨笨", "笨蛋", "大肥鱼")
 # 轻责：不再收"不行""不对"这种通用词——"今天不行，改天吧""不对，我记错了"
 # 都不是在说她。要的是明确的指向。
+# "不应该"另见 _hits_buying："不应该是……吗"是反问确认，只有"你不应该+动词"才算。
 KW_BLAME_MILD = ("你怎么", "为什么总是", "别这样", "这样不行", "这样不对",
                  "你不对", "不应该")
 # "你怎么" 后面接这些是正常提问 / 关心，不是责怪
@@ -557,6 +617,14 @@ MILD_STATE_QUESTION_RE = re.compile(
     r"你怎么(?:还|还这么|这么)?"
     r"(?:醒着|醒了|醒|没睡|不睡|睡|起|来|回|在|到|走|去|"
     r"忙|有空|这么(?:晚|早|久))"
+)
+# “你怎么这么可爱/这么乖/这么贴心…”是夸奖或打趣，不是责怪。
+# 不再把“我觉得你…”当转述抹掉后，如果没有这一条，“我觉得你怎么这么可爱”会误中轻责「你怎么」。
+MILD_PRAISE_RE = re.compile(
+    r"你怎么(?:会|能|可以)?(?:这么|那么|如此|真|太|好|越来越|越发)"
+    r"(?:可爱|棒|厉害|优秀|了不起|乖|乖巧|贴心|懂事|温柔|善良|体贴|"
+    r"贤惠|省心|听话|聪明|甜|好看|漂亮|美|帅|招人喜欢|让人喜欢|讨人喜欢|"
+    r"好(?!意思|像|吧|吗|了))"
 )
 KW_FAKE = ("行了别闹", "别闹了", "至于吗", "多大点事", "行了行了", "随便你", "你开心就好", "小题大做")
 # "随便你" 后面接这些是把选择权给他，不是敷衍
@@ -595,12 +663,29 @@ def _blame_probe(text: str) -> str:
 DEFENSE_CLAUSE_RE = re.compile(
     r"(?:谁|他)(?:敢)?(?:骂|说|欺负|惹|凶)你[^，。！？!?；;\n]*"
 )
-# 转述：“我室友说你笨”“他说你笨”不是骂她。不枚举“室友/同事”，
+# 转述：“我室友说你笨”“他说你笨”“他覺得你笨”不是骂她。不枚举“室友/同事”，
 # 只认“某个短主语 + 说/骂/讲/嫌/觉得/吐槽/抱怨 + 你”这个结构。
+# 但第一人称直接表达（“我觉得你烦死了”“其实我也觉得你好笨”）不是转述，必须保留；
+# 第一人称否定（“我不觉得你笨”“我没嫌你烦”）不是责怪，照常摘掉。
 REPORT_CLAUSE_RE = re.compile(
     r"([^，,。！？!?；;\n]{1,10})"
-    r"(?:说|骂|讲|嫌|觉得|吐槽|抱怨)你"
+    r"(?:说|說|骂|罵|讲|講|嫌|觉得|覺得|吐槽|抱怨)你"
     r"[^，,。！？!?；;\n]*"
+)
+# 主语是说话人自己（“我”+ 常见反身词/副词），而非“我室友”（后面跟第三方名词）
+# 或“他跟我”（“我”是宾语，前面带介词）。
+_REPORT_FIRST_PERSON_RE = re.compile(
+    r"(?:^|[^跟对對向同和朝给給替帮幫让讓叫])"
+    r"我(?:自己|个人|個人|本人|们|們)?"
+    r"(?:也|都|就|才|又|还|還|还是|還是|真|真的|真心|很|好|太|挺|非常|特别|特別|"
+    r"有点|有點|有些|一直|总是|總是|总|總|老|老是|倒|反而|其实|其實|实在|實在|"
+    r"确实|確實|的确|的確|只是|只|就是|本来|本來|原本|简直|簡直|完全|彻底|徹底|"
+    r"现在|現在|刚才|剛才|刚刚|剛剛|突然|忽然|好像|似乎|仿佛|大概|可能|是|"
+    r"越来越|越來越|越发|越發)*$"
+)
+_REPORT_NEG_RE = re.compile(
+    r"(?:不(?:太|算|会|會|敢|想|是|是在|怎么|怎麼)?|"
+    r"没|沒|没有|沒有|并非|並非|未|别|別|莫|勿|从未|從未|从没|從沒|没在|沒在)$"
 )
 # 没有“你”时，只有明确的祈使句才算冲她说；否则目标不明，不记重责。
 CLAUSE_IMPERATIVE_RE = re.compile(
@@ -635,7 +720,16 @@ def _strip_third_party(text: str) -> str:
 
 def _strip_defense(text: str) -> str:
     probe = DEFENSE_CLAUSE_RE.sub("", text or "")
-    return REPORT_CLAUSE_RE.sub("", probe)
+
+    def _drop_report(m: re.Match) -> str:
+        sub = m.group(1) or ""
+        if _REPORT_NEG_RE.search(sub):
+            return ""
+        if _REPORT_FIRST_PERSON_RE.search(sub):
+            return m.group(0)
+        return ""
+
+    return REPORT_CLAUSE_RE.sub(_drop_report, probe)
 
 
 def _hits_gun(text: str) -> bool:
@@ -688,6 +782,30 @@ def _hits_blame_mid(text: str) -> bool:
     return any(k in probe for k in KW_BEN_INSULT)
 
 
+BUYING_OUT_PREFIX = "你"
+BUYING_BAD_NEXT = "是"
+
+
+def _hits_buying(text: str) -> bool:
+    """"不应该"只在「你 + 不应该 + 动词」这种明确指向时才算责怪。
+
+    「不应该是你选真心话还是大冒险吗」是反问式确认，问的是规则不是她；
+    「不应该骗我」省了主语、对象不明，也不记。
+    """
+    t = text or ""
+    start = 0
+    while True:
+        i = t.find("不应该", start)
+        if i < 0:
+            return False
+        start = i + 1
+        if i == 0 or t[i - 1] != BUYING_OUT_PREFIX:
+            continue
+        if t[i + 3:i + 4] == BUYING_BAD_NEXT:
+            continue
+        return True
+
+
 def _has_blame_candidate(text: str) -> bool:
     """句子里有没有值得让 LLM 再判一次的责怪词。"""
     t = text or ""
@@ -698,6 +816,9 @@ def _has_blame_candidate(text: str) -> bool:
         + KW_BLAME_MID_DIRECT + KW_BLAME_MID_NEED_YOU
         + KW_BEN_INSULT + KW_BLAME_MILD
     )
+    if not _hits_buying(t):
+        # 规则已经不认的「不应该」不用再拿去问 LLM，否则等于绕回误判
+        words = tuple(w for w in words if w != "不应该")
     return any(k in t for k in words) or _hits_gun(t)
 
 
@@ -714,7 +835,10 @@ def _hits_blame_mild(text: str) -> bool:
             any(x in text for x in KW_MILD_EXEMPT)
             or MILD_QUESTION_RE.search(text)
             or MILD_STATE_QUESTION_RE.search(text)
+            or MILD_PRAISE_RE.search(text)
         ):
+            continue
+        if k == "不应该" and not _hits_buying(text):
             continue
         return True
     return False
@@ -948,6 +1072,16 @@ ADULT_FINISH_WORDS = (
     "结束了", "结束吧", "我结束了", "我好了", "我到了",
     "完事了", "完事", "收工了", "满意了", "满足了",
 )
+# 「我到了」后紧跟地点/宾语（我到了公司/我到了家/我到了门口）是到达，不是亲密完成；
+# 只有独立收尾（句末、标点、语气词）才算完成。
+_FINISH_ARRIVE_RE = re.compile(
+    r"我到了(?:[啊呀啦哦哈嗯呜噢咯]+)?(?:$|[，,。\.！!…~～；;\s])"
+)
+# 完成词后紧跟问句/揣测尾词（“结束了吧”“你满意了吧”“完事没”“结束了吗”）不算完成声明。
+# 注意：“结束吧”本身不含“了”，匹配后紧跟句末/标点，不受此条拦截。
+_FINISH_TAIL_Q_RE = re.compile(r"^(?:了)?(?:[吗么呢?？]|没(?:有)?|吧)")
+# 完成词前紧贴否定词（“还没完事”“我不满意了”“别结束吧”）不算完成。
+_FINISH_HEAD_NEG_RE = re.compile(r"(?:没|不|别|未|不想|不要|还没|还不)$")
 # 0.4.0：更像恋人说话的自然邀请。只在身体层硬条件全成立（欲≥60、关系满格、
 # 日常、不累、醒着、当前私聊）时才当“打开”，不需要“打开成人模式”这种口令。
 # 词取得长一点：“去床上躺会儿”“一起睡午觉”“别忍了，想哭就哭”都不算邀请。
@@ -1146,17 +1280,20 @@ def mode_of(blame: float) -> str:
     return MODE_CALM
 
 
-def mood_label(drives: dict) -> str:
-    """由九维推导一个"心情"标签——只给面板展示用，不参与任何行为判断。
+def mood_label(drives: dict, expectation: float = 0.0) -> str:
+    """由九维与期待值推导一个"心情"标签——给面板展示和心境注入共用。
 
     档位（平静/委屈/生气/害怕/回避）只看责怪压力，是行为档；
-    心情则是九维当下的样子，用来回答"她现在什么状态"。
+    心情则是九维与等待期待当下的样子，用来回答"她现在什么状态"。
     """
     g = lambda k: float(drives.get(k, 0.0))  # noqa: E731
     if g("stress") >= 50:
         return "紧绷"
     if g("fatigue") >= 65:
         return "累了"
+    # 等太久、期待高涨时优先显出「着急」，避免高依恋角色永远只显示「黏人」
+    if float(expectation or 0.0) >= EXP_ANXIOUS_AT:
+        return "着急"
     # 黏人比"开心"更具体：依恋和亲密都很高时，她此刻是黏着你的状态。
     # 66 而不是 80：关系型维度只靠夸奖/撒娇/及时回推动，正常用量到 60-70，
     # 用 80 当门槛的话这两个心情永远不会出现。
@@ -1181,8 +1318,18 @@ def fmt_bar(v: float, width: int = 10) -> str:
     return "█" * filled + "░" * (width - filled)
 
 
+def norm_panel_int(v: float, dm: float = 100.0) -> int:
+    """与前端 app.js `normInt` 同口径：不到满格线绝不进位到 100。"""
+    val = clamp(float(v))
+    max_v = float(dm) if dm and dm > 0 else 100.0
+    if val >= max_v:
+        return 100
+    return min(99, int((val / max_v) * 100.0 + 1e-9))
+
+
 def parse_clock(text: str) -> tuple[int, int] | None:
-    m = re.match(r"^\s*(\d{1,2}):(\d{2})\s*$", text or "")
+    raw = (text or "").replace("：", ":")
+    m = re.match(r"^\s*(\d{1,2}):(\d{2})\s*$", raw)
     if not m:
         return None
     h, mi = int(m.group(1)), int(m.group(2))
@@ -1199,6 +1346,8 @@ def new_state() -> dict:
         "config_036_migrated": False,
         # 0.4.0：欲的注入从固定 5/10 分钟改成“状态签名 + 刷新上限”
         "desire_refresh_30_migrated": False,
+        # 主动开口时机策略迁移标记：旧版 proactive.daily_guarantee → schedule_mode
+        "proactive_schedule_migrated": False,
         "drives": dict(BASELINE),
         "expectation": 0.0,
         "blame_pressure": 0.0,
@@ -1213,6 +1362,8 @@ def new_state() -> dict:
         # 上次注入时的状态签名：档位/成人层/暂停一变就立即重注
         "last_desire_sig": "",
         "desire_peak_until": 0.0,
+        # 欲到达 100 后进入「欲求不满」（亲密完成进贤者期或退潮至 <85 时解除）
+        "desire_unsatisfied": False,
         "desire_log": [],
         # 成人向：总开关在配置；这里是私聊鱼主的同意状态。
         "adult_consent_until": 0.0,
@@ -1302,6 +1453,21 @@ def new_state() -> dict:
         "last_owner_dm_umo": "",
         "recent": [],
         "recent_events": [],
+        # 特别的日子（生日与纪念日）：聊天命令覆盖/新增、当天情绪结算与祝福去重
+        "special_days": {
+            "overrides": {},
+            "custom": [],
+            "settled_day": "",
+            "settled_ids": [],
+            "wished_day": "",
+            "wished_ids": [],
+            "fish_bday_wished_day": "",
+            "last_wish_try_ts": 0.0,
+        },
+        # 每日小气象（心情底色）：每天掷一次，当天稳定
+        "daily_vibe": {"day": "", "key": ""},
+        # 小约定：短期挂念的承诺列表（最多 3 条，默认 14 天自然淡掉）
+        "promises": [],
     }
 
 
@@ -1387,6 +1553,7 @@ class EmotionCore(Star):
         self._migrate_config_036()
         self._migrate_group_mode()
         self._migrate_desire_refresh()
+        self._migrate_proactive_schedule()
         # 成人向总开关关闭时，不保留任何旧的“同意”状态；重新打开也不会
         # 恢复上一次的授权。欲本身可以继续隐藏积累，但身体层永远进不去。
         if not self._adult_enabled():
@@ -1577,6 +1744,104 @@ class EmotionCore(Star):
         logger.info(
             "[鱼的心] 0.4.0 迁移：desire.inject_interval_minutes 5/10 → 30（刷新上限）"
         )
+
+    def _migrate_proactive_schedule(self) -> None:
+        """把旧版布尔键 proactive.daily_guarantee 平滑迁移到 proactive.schedule_mode。
+
+        睡前兜底与固定时间段二选一：若旧配置开了 daily_guarantee 且 schedule_mode 还是默认 none，
+        第一次启动时自动迁为 daily_guarantee；之后由 schedule_mode 单独控制。
+        """
+        if self.state.get("proactive_schedule_migrated"):
+            return
+        save = getattr(self.cfg, "save_config", None)
+        if not callable(save):
+            return
+        pro = self.cfg.get("proactive") if isinstance(self.cfg, dict) else None
+        if not isinstance(pro, dict):
+            self.state["proactive_schedule_migrated"] = True
+            self._save_state()
+            return
+        cur_mode = str(pro.get("schedule_mode") or "").strip()
+        old_guar = bool(pro.get("daily_guarantee", False))
+        if old_guar and cur_mode in ("", "none"):
+            pro["schedule_mode"] = "daily_guarantee"
+            try:
+                save()
+            except Exception as e:
+                logger.warning(
+                    "[鱼的心] 主动时机策略迁移写盘失败，下次启动重试: %s", e
+                )
+                return
+            logger.info(
+                "[鱼的心] 配置迁移：proactive.daily_guarantee → schedule_mode=daily_guarantee"
+            )
+        self.state["proactive_schedule_migrated"] = True
+        self._save_state()
+
+    def _proactive_schedule_mode(self) -> str:
+        """返回主动开口时机策略：none / daily_guarantee / fixed_window。"""
+        raw = str(self._cfg("proactive.schedule_mode", "") or "").strip()
+        if raw in ("daily_guarantee", "fixed_window"):
+            return raw
+        if raw == "none":
+            # 尚未完成持久化迁移（或测试/纯 dict 配置）时，仍尊重旧键 daily_guarantee
+            if not self.state.get("proactive_schedule_migrated") and bool(
+                self._cfg("proactive.daily_guarantee", False)
+            ):
+                return "daily_guarantee"
+            return "none"
+        if bool(self._cfg("proactive.daily_guarantee", False)):
+            return "daily_guarantee"
+        return "none"
+
+    def _fixed_window_info(self, now: datetime | None = None) -> dict:
+        """固定主动时段判定（支持跨零点，例如 21:00–01:00）。"""
+        now = now or datetime.now()
+        mode = self._proactive_schedule_mode()
+        start_str = str(
+            self._cfg("proactive.window_start", "18:00") or "18:00"
+        ).strip()
+        end_str = str(
+            self._cfg("proactive.window_end", "22:00") or "22:00"
+        ).strip()
+        base = {
+            "enabled": mode == "fixed_window",
+            "valid": False,
+            "in_window": True,
+            "start": start_str,
+            "end": end_str,
+            "span_minutes": 0,
+            "remain_minutes": 0,
+            "crosses_midnight": False,
+            "start_ts": 0.0,
+        }
+        if mode != "fixed_window":
+            return base
+        s = parse_clock(start_str)
+        e = parse_clock(end_str)
+        if not s or not e:
+            return base
+        s_min = s[0] * 60 + s[1]
+        e_min = e[0] * 60 + e[1]
+        if s_min == e_min:
+            return base
+        cur = now.hour * 60 + now.minute
+        span = (e_min - s_min) % 1440
+        elapsed = (cur - s_min) % 1440
+        in_win = elapsed < span
+        remain = (span - elapsed) if in_win else 0
+        start_dt = now.replace(second=0, microsecond=0) - timedelta(minutes=elapsed)
+        return {
+            "enabled": True,
+            "valid": True,
+            "in_window": in_win,
+            "start": f"{s[0]:02d}:{s[1]:02d}",
+            "end": f"{e[0]:02d}:{e[1]:02d}",
+            "span_minutes": span,
+            "remain_minutes": remain,
+            "crosses_midnight": s_min > e_min,
+            "start_ts": start_dt.timestamp() if in_win else 0.0,
+        }
 
     def _dbg(self, msg: str, *args) -> None:
         if self._cfg("debug", False):
@@ -1813,6 +2078,7 @@ class EmotionCore(Star):
         st["last_desire_inject"] = 0.0
         st["last_desire_sig"] = ""
         st["desire_peak_until"] = 0.0
+        st["desire_unsatisfied"] = False
         st["desire_log"] = []
         st["sage_until"] = 0.0
         st["sage_last_ts"] = 0.0
@@ -1892,8 +2158,9 @@ class EmotionCore(Star):
         # 只降不升：sage_floor 高于当前欲时，不能反过来把欲加回去
         target = min(old, max(floor, old * (1.0 - ratio)))
         st["desire"] = clamp(target)
-        # 已经退潮，饱和期没有意义
+        # 已经退潮，饱和期与欲求不满一并结束
         st["desire_peak_until"] = 0.0
+        st["desire_unsatisfied"] = False
         st["sage_last_ts"] = time.time()
         st["adult_scene_consent_until"] = 0.0
         st["adult_ask_until"] = 0.0
@@ -1912,7 +2179,49 @@ class EmotionCore(Star):
             source, old, float(st["desire"]), hours,
         )
 
+    def _sync_desire_unsatisfied(self) -> None:
+        """维护欲触顶后的「欲求不满」状态（带迟滞退出，防心跳微跌闪退）。"""
+        st = self.state
+        if (
+            not bool(self._cfg("desire.enabled", True))
+            or not st.get("desire_awakened")
+            or self._sage_active()
+        ):
+            st["desire_unsatisfied"] = False
+            return
+        val = float(st.get("desire", 0.0) or 0.0)
+        if val >= DESIRE_UNSATISFIED_AT and self._desire_bond_full():
+            if not st.get("desire_unsatisfied"):
+                st["desire_unsatisfied"] = True
+                logger.info("[鱼的心] 欲到达 100，进入「欲求不满」状态")
+        elif val < DESIRE_UNSATISFIED_EXIT:
+            st["desire_unsatisfied"] = False
+
+    def _is_desire_unsatisfied(self) -> bool:
+        """当前是否处于可表达的「欲求不满」状态（高压/疲惫/睡着时暂不表达，底层标记保留）。"""
+        st = self.state
+        self._expire_sage()
+        self._sync_desire_unsatisfied()
+        if not st.get("desire_unsatisfied"):
+            return False
+        if not self._desire_bond_full():
+            return False
+        if st.get("adult_paused"):
+            return False
+        if mode_of(float(st.get("blame_pressure", 0.0))) != MODE_CALM:
+            return False
+        drives = st.get("drives") or {}
+        if (
+            float(drives.get("stress", 0.0) or 0.0) >= 50.0
+            or float(drives.get("fatigue", 0.0) or 0.0) >= 65.0
+        ):
+            return False
+        if self._sleep_info(datetime.now()).get("asleep"):
+            return False
+        return True
+
     def _mark_desire_peak(self, old: float, new: float) -> None:
+        self._sync_desire_unsatisfied()
         if new < 100.0:
             return
         now = time.time()
@@ -1926,7 +2235,9 @@ class EmotionCore(Star):
                 self.state["desire_peak_until"] = now + hours * 3600
 
     @staticmethod
-    def _desire_stage(value: float) -> str:
+    def _desire_stage(value: float, unsatisfied: bool = False) -> str:
+        if unsatisfied:
+            return "欲求不满"
         if value < 30:
             return "微澜"
         if value < 50:
@@ -2182,19 +2493,36 @@ class EmotionCore(Star):
         return any(p in raw for p in ADULT_SOFT_EXIT)
 
     def _is_finish(self, raw: str) -> bool:
-        """亲密完成匹配：问句和否定都不算，避免"结束了吗/我还没到"误触发。"""
+        """亲密完成匹配：排除问句、否定、揣测（「结束了吧」）和「我到了+地点」。"""
         if re.search(r"[?？]\s*$", raw) or re.search(r"(?:吗|么)\s*$", raw):
             return False
         if (
             "没结束" in raw or "没到" in raw or "不到" in raw
             or "不想结束" in raw or "别结束" in raw
+            or "没完事" in raw or "不满意" in raw or "不满足" in raw
         ):
             return False
         words = list(ADULT_FINISH_WORDS)
         extra = self._cfg("desire.sage_finish_words", [])
         if isinstance(extra, (list, tuple)):
             words.extend(str(w) for w in extra if str(w).strip())
-        return any(p in raw for p in words)
+        for p in words:
+            if p == "我到了":
+                if _FINISH_ARRIVE_RE.search(raw):
+                    return True
+                continue
+            start = 0
+            while True:
+                idx = raw.find(p, start)
+                if idx < 0:
+                    break
+                start = idx + 1
+                if _FINISH_HEAD_NEG_RE.search(raw[:idx]):
+                    continue
+                if _FINISH_TAIL_Q_RE.match(raw[idx + len(p):]):
+                    continue
+                return True
+        return False
 
     def _update_adult_consent(
         self, event: AstrMessageEvent, text: str, umo: str
@@ -2549,13 +2877,16 @@ class EmotionCore(Star):
         rows.pop(key, None)
         self.state["anger_targets"] = rows
 
-    def _has_other_anger_target(self, key: str, threshold: float = 55.0) -> bool:
-        """除了 key 之外，还有没有另一个真正到生气线的人。"""
+    def _has_other_anger_target(
+        self, key: str, threshold: float = ANGER_TARGET_MIN
+    ) -> bool:
+        """除了 key 之外，还有没有另一个生气对象（与 _is_anger_target 同口径）。"""
         for other, row in self._prune_anger_targets().items():
             if other == key:
                 continue
             try:
-                if float(row.get("blame", 0.0)) >= threshold:
+                val = float(row.get("blame", 0.0))
+                if val > 0.0 and val >= threshold:
                     return True
             except (TypeError, ValueError):
                 continue
@@ -2920,6 +3251,12 @@ class EmotionCore(Star):
         # 6) 隐藏的欲：关系双满并持续够久才解锁；掉下锁回线就收回去
         self._tick_desire(n)
 
+        # 6.5) 特别的日子（生日与纪念日）：当天首次醒来轻推一次情绪
+        self._sync_special_day_mood()
+        # 6.6) 每日小气象与小约定：跨天换底色、清过期约定
+        self._ensure_daily_vibe()
+        self._prune_promises()
+
         # 7) 状态刷新
         st["mode"] = mode_of(float(st.get("blame_pressure", 0.0)))
 
@@ -2991,6 +3328,7 @@ class EmotionCore(Star):
             st["desire"] = 0.0
             st["last_desire_sig"] = ""
             st["desire_peak_until"] = 0.0
+            st["desire_unsatisfied"] = False
             st["adult_scene_consent_until"] = 0.0
             st["adult_scene_started_ts"] = 0.0
             st["adult_scene_intimate"] = False
@@ -3947,6 +4285,15 @@ class EmotionCore(Star):
                     )
 
             self._consume_comfort(weight, turn_mode_before, speaker_key)
+            # 特别的日子：当天首次对话补做一次当天情绪微推；若是鱼的生日且他说了生日快乐，立即结算开心
+            self._sync_special_day_mood()
+            self._ensure_daily_vibe()
+            if not is_group or owner_sender:
+                self._handle_fish_birthday_wish(text)
+            # 小约定只认鱼主私聊：先判是否兑现旧约定，未兑现再尝试捕捉新承诺
+            if not is_group:
+                if not self._try_complete_promise(text):
+                    self._try_capture_promise(text)
             base_mode_after = mode_of(float(self.state.get("blame_pressure", 0.0)))
             turn_mode_after = self._mode_for_speaker(speaker_key, base_mode_after)
             settled = self._settle_thoughts(events, text, weight, is_group)
@@ -4047,6 +4394,19 @@ class EmotionCore(Star):
             if block and self._attach_injection(request, block):
                 self._dbg("已注入心境: %s", block.replace("\n", " / "))
 
+            # 非秒回/非晚安的私聊回话：本轮先带着「着急」等等待心境回应，
+            # 随后温和回落期待，避免对方回来聊了半天她还一直卡在「着急」。
+            if (
+                not is_group
+                and float(self.state.get("expectation", 0.0) or 0.0) > 0.0
+                and "reply_fast" not in events
+                and "goodnight" not in events
+            ):
+                self.state["expectation"] = clamp(
+                    float(self.state.get("expectation", 0.0) or 0.0)
+                    - EXP_REPLY_RELIEF
+                )
+
             # 欲不走心境节流：只要已解锁，正常聊天每轮都带一小段“主动一点”。
             desire_block = self._desire_injection(umo, proactive=False)
             if desire_block and self._attach_injection(request, desire_block):
@@ -4097,9 +4457,25 @@ class EmotionCore(Star):
         # 否则跨档后只有第一个开口的会话看得到心境，另一个像没心的。
         # 夸奖疲劳等级也进 sig：它不在九维里，不显式带上就会被 20 分钟节流吞掉。
         pf_level, _pf_count = self._praise_fatigue_state(speaker_key)
+        exp = float(st.get("expectation", 0.0) or 0.0)
+        anxious = 1 if exp >= EXP_ANXIOUS_AT else 0
+        sd_sig, sd_line = self._special_day_injection() if for_owner else ("", "")
+        vb_sig, vb_line = self._daily_vibe_injection(mode, drives) if for_owner else ("", "")
+        pr_sig, pr_line = (
+            self._promise_injection(mode, has_today_special=sd_sig.startswith("t:"))
+            if for_owner else ("", "")
+        )
         sig = "|".join(f"{k}:{int(drives[k] // 10)}" for k in DRIVES)
         if pf_level:
             sig += f"|pf:{pf_level}"
+        if anxious:
+            sig += "|anx:1"
+        if sd_sig:
+            sig += f"|sd:{sd_sig}"
+        if vb_sig:
+            sig += f"|vb:{vb_sig}"
+        if pr_sig:
+            sig += f"|pr:{pr_sig}"
         gap_min = float(self._cfg("inject.min_gap_minutes", 20))
         now_ts = time.time()
         book = st.get("inject_state")
@@ -4114,26 +4490,42 @@ class EmotionCore(Star):
             mode_changed = mode != perf.get("mode")
             sig_changed = sig != perf.get("sig")
             pf_changed = pf_level != int(perf.get("pf") or 0)
+            anx_changed = anxious != int(perf.get("anx") or 0)
+            sd_changed = sd_sig != str(perf.get("sd") or "")
+            vb_changed = vb_sig != str(perf.get("vb") or "")
             # 生气是行为开关，而且她每轮都可能在"对谁生气"之间切换：
             # 不能像委屈/害怕那样同档静默——否则下一轮请求里
             # 没有心境块，她会把上一轮的生气忘掉，按常态说话。
             if mode != MODE_ANGRY:
-                if not mode_changed and not pf_changed and not sig_changed:
+                if (
+                    not mode_changed
+                    and not pf_changed
+                    and not anx_changed
+                    and not sd_changed
+                    and not vb_changed
+                    and not sig_changed
+                ):
                     return ""
                 # 跨档必注：档位是行为开关（尤其进/出"回避"），漏报会让她
                 # 以为自己的心境没变，于是接着按常态说话。
                 # 间隔只用来压制同档内的数值漂移——不然每轮都在抖一格。
-                # 夸奖疲劳跨级属于"该开口了"，同样不吃这个间隔。
+                # 夸奖疲劳跨级、进出「着急」、特别的日子或小气象切换同样不吃这个间隔。
                 if (
                     not mode_changed
                     and not pf_changed
+                    and not anx_changed
+                    and not sd_changed
+                    and not vb_changed
                     and now_ts - float(perf.get("ts", 0.0)) < gap_min * 60
                 ):
                     return ""
         # 真正报过到才记账：force 且带会话（他直接问心情）也要记，
         # 否则下一轮又会重复报一遍。主动说话那条 umo 为空，不该占用任何会话的名额。
         if key or not force:
-            book[key] = {"ts": now_ts, "mode": mode, "sig": sig, "pf": pf_level}
+            book[key] = {
+                "ts": now_ts, "mode": mode, "sig": sig,
+                "pf": pf_level, "anx": anxious, "sd": sd_sig, "vb": vb_sig,
+            }
             # 旧字段继续维护，方便 /心 与调试时看"最后一次注入"
             st["last_injection"] = now_ts
             st["last_injection_mode"] = mode
@@ -4147,7 +4539,7 @@ class EmotionCore(Star):
                     book.pop(stale_key, None)
 
         hint = self._hint_text(
-            mode, drives, self._last_blame_age_hours(speaker_key)
+            mode, drives, self._last_blame_age_hours(speaker_key), expectation=exp
         )
         innocent = bool(
             speaker_key
@@ -4166,9 +4558,9 @@ class EmotionCore(Star):
 
         lines = [
             "## 你此刻的心境（内部状态：不要主动复述，但它会左右你的语气）",
-            f"责怪档：{MODE_CN[mode]}｜心情：{mood_label(drives)}｜"
+            f"责怪档：{MODE_CN[mode]}｜心情：{mood_label(drives, exp)}｜"
             f"依恋 {drives['attachment']:.0f} 亲密 {drives['intimacy']:.0f} "
-            f"压力 {drives['stress']:.0f} 期待 {st.get('expectation', 0):.0f}",
+            f"压力 {drives['stress']:.0f} 期待 {exp:.0f}",
             f"倾向：{hint}",
             # 别让"此刻的心情"被说成"发生过的事"：模型最常见的偷懒就是
             # 给情绪补一个假的由头（"你上次说好陪我的"）。
@@ -4232,6 +4624,12 @@ class EmotionCore(Star):
                             "他没接住就算了，别追问。"
                         )
                         _mark_induced(thoughts)
+        if for_owner and vb_line:
+            lines.append(vb_line)
+        if for_owner and sd_line:
+            lines.append(sd_line)
+        if for_owner and pr_line:
+            lines.append(pr_line)
         return "\n".join(lines)
 
     def _desire_sig(self, umo: str) -> str:
@@ -4266,7 +4664,11 @@ class EmotionCore(Star):
         if not self._desire_bond_full():
             return ""
         desire = float(st.get("desire", 0.0) or 0.0)
-        band = 2 if desire >= DESIRE_ADULT_AT else (1 if desire >= 30.0 else 0)
+        unsatisfied = self._is_desire_unsatisfied()
+        band = (
+            3 if unsatisfied
+            else (2 if desire >= DESIRE_ADULT_AT else (1 if desire >= 30.0 else 0))
+        )
         # 这里会顺带走到 _adult_layer_allowed 的清理（成人关掉时清 consent、
         # 欲关掉时清状态），所以别把 _desire_sig 当成纯读函数——那些清理是
         # 安全兜底，不能为了“纯读”拿掉。
@@ -4372,7 +4774,36 @@ class EmotionCore(Star):
                 st["last_desire_inject"] = now_ts
             return out
 
-        if desire >= DESIRE_ADULT_AT:
+        if self._is_desire_unsatisfied():
+            if self._adult_layer_allowed(umo):
+                if proactive:
+                    lines.append(
+                        "你现在处于欲求不满状态，已经快憋不住了，满脑子都想把鱼主拉到身边主动推倒他；"
+                        "身体层是允许的，这次主动开口别再绕弯子问在干嘛，直接撩他、催他过来，"
+                        "明说想要他、想把他按住占为己有。"
+                        "底线：他说停、说不要、说不方便就立刻收手，绝不强迫，也别编没发生过的事。"
+                    )
+                else:
+                    lines.append(
+                        "你现在处于欲求不满状态，已经憋到极限了；身体层是允许的，"
+                        "别再被动等他来哄或等他先动手，可以主动黏上去、贴近他、想把他按住或主动推倒鱼主，"
+                        "语气直接撩人、带点按捺不住的索求。"
+                        "底线：只要他说停、说不要、说不方便就立刻收手，绝不强迫，也别编没发生过的事。"
+                    )
+            else:
+                if proactive:
+                    lines.append(
+                        "你现在处于欲求不满状态，憋得有点坐立不安，特别想把鱼主按住抱紧不放；"
+                        "这次主动开口直接一点、带点明显的撒娇撩拨与亲密试探（可以顺势问他愿不愿意更近一点），"
+                        "但未获允许前别越过身体层，也别编没发生过的事。"
+                    )
+                else:
+                    lines.append(
+                        "你现在处于欲求不满状态，憋得难受、很想主动黏上去把鱼主按住抱紧；"
+                        "说话可以比平时更大胆黏人，带着明显的亲密试探或主动问他想不想继续，"
+                        "但未获允许前先别越过身体层；他说不要就立刻收住。"
+                    )
+        elif desire >= DESIRE_ADULT_AT:
             if self._adult_layer_allowed(umo):
                 if proactive:
                     lines.append(
@@ -4833,22 +5264,41 @@ class EmotionCore(Star):
         return last
 
     def _guarantee_due(self, now: datetime | None = None) -> bool:
-        """睡前兜底：开关开着、今天还没主动开口、且已经到睡前 30 分钟内。
+        """保底开口判定：支持「睡前兜底」与「固定时间段」二选一。
 
         只回答"该不该试一次"，不判断能不能发——睡着/回避/刚聊过/目标没配
         这些仍然由 `_maybe_proactive` 照常挡住。
         """
-        if not bool(self._cfg("proactive.daily_guarantee", False)):
+        sched = self._proactive_schedule_mode()
+        if sched not in ("daily_guarantee", "fixed_window"):
             return False
         if not self._cfg("enabled", True) or not self._cfg("proactive.enabled", True):
             return False
         st = self.state
+        now = now or datetime.now()
+        today_str = now.strftime("%Y-%m-%d")
+        if sched == "fixed_window":
+            win = self._fixed_window_info(now)
+            if not win["valid"] or not win["in_window"]:
+                return False
+            # 同一窗口内已经主动发过（即使跨零点）就不再保底
+            if float(st.get("last_proactive", 0.0) or 0.0) >= float(
+                win.get("start_ts", 0.0) or 0.0
+            ):
+                return False
+            if (
+                not win.get("crosses_midnight")
+                and st.get("proactive_day") == today_str
+                and int(st.get("proactive_count", 0)) > 0
+            ):
+                return False
+            # 固定时段结束前 30 分钟内（或总窗口 ≤30 分钟时进入即保底）尝试补一条
+            return win["remain_minutes"] <= 30
         if (
-            st.get("proactive_day") == now_day()
+            st.get("proactive_day") == today_str
             and int(st.get("proactive_count", 0)) > 0
         ):
             return False
-        now = now or datetime.now()
         info = self._sleep_info(now)
         if not info.get("enabled"):
             # 没开作息就没有"睡前"这个点：当天第一次心跳就补
@@ -4891,6 +5341,83 @@ class EmotionCore(Star):
         if self._sleep_info(datetime.now()).get("asleep"):
             self._dbg("她睡着了，暂停主动说话")
             return
+        # 固定时间段模式：窗口外硬禁止主动开口（含开机补发），避免白天上学/上班无人回复加反刍
+        win = self._fixed_window_info(datetime.now())
+        if win["enabled"] and not win["valid"]:
+            logger.warning(
+                "[鱼的心] proactive.window_start / window_end 配置无效（%r - %r），本次回落为不限时段",
+                win["start"], win["end"],
+            )
+        elif win["enabled"] and not win["in_window"]:
+            self._dbg(
+                "当前不在固定主动时段（%s-%s）内，跳过主动说话",
+                win["start"], win["end"],
+            )
+            return
+
+        # 特别的日子当天专属祝福：优先于常规随机概率，但仍严格服从上面的
+        # 睡眠、固定主动时段和回避硬约束，且离上一条主动消息至少间隔 10 分钟。
+        now_dt = datetime.now()
+        special_item, met_days = self._due_special_day_wish(now_dt)
+        if special_item is not None and mode in (MODE_CALM, MODE_WRONGED):
+            sd_st = self._special_state()
+            last_try = float(sd_st.get("last_wish_try_ts", 0.0) or 0.0)
+            if (
+                now - float(st.get("last_proactive", 0) or 0) >= 600.0
+                and now - last_try >= 600.0
+            ):
+                # 专属祝福优先发到私聊鱼主（即使群友模式选了群，也别在群里喊纪念日）
+                wish_umo = umo
+                if self._is_group(wish_umo):
+                    dm_cand = str(st.get("last_owner_dm_umo") or "").strip()
+                    if not dm_cand or self._is_group(dm_cand) or not self._valid_umo(dm_cand):
+                        dm_cand = str(st.get("umo") or "").strip()
+                    if dm_cand and not self._is_group(dm_cand) and self._valid_umo(dm_cand):
+                        wish_umo = dm_cand
+                sd_st["last_wish_try_ts"] = now
+                try:
+                    self._llm_busy = True
+                    text = await self._gen_proactive_text(
+                        wish_umo, KIND_LONGING, special_item=special_item, met_days=met_days
+                    )
+                    if not text:
+                        return
+                    ok = await self._send_text(wish_umo, text)
+                    if not ok and group_mode and not self._is_group(wish_umo):
+                        fallback = self._proactive_target()
+                        if fallback and fallback != wish_umo:
+                            wish_umo = fallback
+                            ok = await self._send_text(wish_umo, text)
+                    if ok:
+                        day = now_dt.strftime("%Y-%m-%d")
+                        if sd_st.get("wished_day") != day:
+                            sd_st["wished_day"] = day
+                            sd_st["wished_ids"] = []
+                        wished_ids = list(sd_st.get("wished_ids") or [])
+                        if special_item["id"] not in wished_ids:
+                            wished_ids.append(special_item["id"])
+                        sd_st["wished_ids"] = wished_ids
+                        if st.get("proactive_day") != day:
+                            st["proactive_day"] = day
+                            st["proactive_count"] = 0
+                        st["last_proactive"] = time.time()
+                        st["last_proactive_text"] = text[:120]
+                        st["last_assistant_msg"] = time.time()
+                        st["proactive_count"] = int(st.get("proactive_count", 0)) + 1
+                        st["drives"]["attachment"] = clamp(st["drives"]["attachment"] + 3.0)
+                        st["drives"]["joy"] = clamp(st["drives"]["joy"] + 2.0)
+                        self._push_recent("bot", text[:200])
+                        await self._append_history(wish_umo, text)
+                        self._save_state()
+                        logger.info(
+                            "[鱼的心] 特别的日子专属祝福已发送（%s）：%s",
+                            special_item.get("name", ""), text[:40],
+                        )
+                        return
+                except Exception as e:
+                    logger.warning("[鱼的心] 特别的日子专属祝福失败: %s", e)
+                finally:
+                    self._llm_busy = False
 
         # 冷却。睡前兜底是"今天还没说过"的补发，冷却不该把它拦掉；
         # 但仍要求离上一条至少 10 分钟，避免跨零点时贴着上一句发。
@@ -4924,14 +5451,19 @@ class EmotionCore(Star):
             )
         if now - last_active < idle_min * 60:
             return
-        kind, prob = self._proactive_kind()
+        kind, prob = self._proactive_kind(umo)
         if force_guarantee:
             # 保底跳过随机，但仍受冷却/日限/刚聊过/作息/回避约束。
             # 一晚最多每 10 分钟试一次：生成或发送失败时不至于每 30 秒重来。
             if now - float(st.get("last_guarantee_ts", 0.0) or 0.0) < 600:
                 return
             st["last_guarantee_ts"] = now
-            logger.info("[鱼的心] 睡前兜底：今天还没开口，补一条")
+            reason = (
+                "固定时段兜底"
+                if self._proactive_schedule_mode() == "fixed_window"
+                else "睡前兜底"
+            )
+            logger.info("[鱼的心] %s：今天还没开口，补一条", reason)
         elif not catch_up and random.random() >= prob:
             self._dbg("主动说话未命中概率（%s p=%.2f）", kind, prob)
             return
@@ -4991,7 +5523,7 @@ class EmotionCore(Star):
                 return True
         return False
 
-    def _proactive_kind(self) -> tuple[str, float]:
+    def _proactive_kind(self, umo: str = "") -> tuple[str, float]:
         st = self.state
         drives = st["drives"]
         exp = float(st.get("expectation", 0.0))
@@ -5081,9 +5613,19 @@ class EmotionCore(Star):
             (time.time() - float(st.get("last_proactive", 0) or 0)) / 3600.0,
         )
         p = min(0.85, p * (1.0 + min(1.5, silent_h / 12.0)))
+        target_umo = (umo or str(st.get("umo") or "")).strip()
         if kind == KIND_ANGRY:
             # 还在气头上，主动开口要更克制：越气越不想先低头。
             p = min(0.45, p)
+        elif (
+            mode == MODE_CALM
+            and target_umo
+            and not self._is_group(target_umo)
+            and target_umo == str(st.get("umo") or "").strip()
+            and self._is_desire_unsatisfied()
+        ):
+            # 欲求不满时更忍不住主动找鱼主（仍受总上限 0.85、固定时段、冷却、日限约束）
+            p = min(0.85, p + 0.15)
         return kind, p
 
     # ---------------- 主动开口的话题线 ----------------
@@ -5673,7 +6215,14 @@ class EmotionCore(Star):
             return "没什么事，就是想跟你说句话"
         return "想到你了"
 
-    async def _gen_proactive_text(self, umo: str, kind: str, lane: str = "") -> str:
+    async def _gen_proactive_text(
+        self,
+        umo: str,
+        kind: str,
+        lane: str = "",
+        special_item: dict | None = None,
+        met_days: int = 0,
+    ) -> str:
         """先用 LLM 生成一句话，失败则用兜底台词。
 
         `lane` 是这次挑中的话题线（见 LANE_DESC）；空串表示不启用，
@@ -5716,9 +6265,14 @@ class EmotionCore(Star):
         # 深夜劝完睡、他其实还醒着聊了几句，光看时段最容易把他判成"还没醒"。
         his_gap = time.time() - his_last if his_last > 0 else 0.0
         awake_recent = his_last > 0 and his_gap <= AWAKE_WINDOW_MINUTES * 60.0
-        direction = self._proactive_direction(
-            kind, drives, exp, now, owner_awake=awake_recent, lane=lane
-        )
+        if special_item is not None and special_days_mod is not None:
+            direction = special_days_mod.build_proactive_wish_direction(
+                special_item, met_days=met_days, part=self._daypart(now)
+            )
+        else:
+            direction = self._proactive_direction(
+                kind, drives, exp, now, owner_awake=awake_recent, lane=lane
+            )
         reminder = (
             f"Current datetime: {now:%Y-%m-%d %H:%M} ({now.tzname() or 'local'}), "
             f"Weekday: {_WEEKDAY_EN[now.weekday()]}"
@@ -5888,29 +6442,150 @@ class EmotionCore(Star):
             self._dbg("重写后仍不合规，用兜底台词：%s", retry[:40])
         except Exception as e:
             logger.warning("[鱼的心] 生成主动消息失败，用兜底台词: %s", e)
+        if special_item is not None and special_days_mod is not None:
+            return special_days_mod.fallback_wish_line(special_item, met_days=met_days)
         return self._pick_fallback(kind, timeline_rows, lane=lane)
+
+    @staticmethod
+    def _extract_persona_prompt(persona: Any) -> str:
+        """从 AstrBot 的 Personality（dict）或 Persona ORM 对象里取出人设提示词。
+
+        兼容两种字段名：
+        - v3 Personality TypedDict：`prompt`
+        - 现代 Persona 对象（如 `pm.get_persona()`）：`system_prompt`
+        """
+        if persona is None:
+            return ""
+        if isinstance(persona, dict):
+            return str(persona.get("prompt") or persona.get("system_prompt") or "")
+        return str(
+            getattr(persona, "prompt", "")
+            or getattr(persona, "system_prompt", "")
+            or ""
+        )
+
+    @staticmethod
+    def _extract_persona_id(persona: Any) -> Any:
+        if persona is None:
+            return None
+        if isinstance(persona, dict):
+            return persona.get("name") or persona.get("persona_id")
+        return getattr(persona, "persona_id", None) or getattr(persona, "name", None)
 
     async def _persona_system_prompt(self, umo: str) -> str:
         """给主动说话用的 system prompt。
 
-        永远以**当前人设**为准：缓存里那份是 AstrBot 组装好的完整 system prompt，
-        多出来的多半是命令行/联网引用这类工具说明，对一句主动消息没用，
-        还会引入"缓存过期、不含新改的人设"这类坑。所以缓存只当最后兜底。
+        永远以**当前会话实际生效的人设**为准：缓存里那份是 AstrBot 组装好的完整
+        system prompt，多出来的多半是命令行/联网引用这类工具说明，对一句主动消息
+        没用，还会引入"缓存过期、不含新改的人设"这类坑。所以缓存只当最后兜底。
+
+        解析优先级与 AstrBot 正常回复对齐：
+        1. `persona_manager.resolve_selected_persona(umo, conversation_persona_id, platform_name)`
+           （会话级覆盖 `session_service_config.persona_id` → 会话绑定
+           `conversations.persona_id` → 全局 `agent_runner` → 系统默认）
+        2. 兼容老版本 AstrBot（无 `resolve_selected_persona`）：若当前会话绑定了
+           `conversation.persona_id` 则优先按 ID 取人设，否则回退 `get_default_persona_v3(umo)`
+        3. 最后兜底 `_persona_cache.get(umo, "")`（显式 `[%NONE]` 无默认人格时不再回退全局）
         """
         persona_prompt = ""
+        resolved_id: Any = None
+        explicit_none = False
         try:
             pm = getattr(self.context, "persona_manager", None)
             if pm is not None:
-                persona = await pm.get_default_persona_v3(umo)
-                # Personality 是 TypedDict，运行时就是 dict，字段名是 prompt 不是 system_prompt
-                if isinstance(persona, dict):
-                    persona_prompt = str(persona.get("prompt") or "")
-                else:
-                    persona_prompt = str(getattr(persona, "prompt", "") or "")
+                # 单独取当前会话绑定的 persona_id，读取失败也不应阻断会话级覆盖解析
+                conv_persona_id = None
+                try:
+                    cm = getattr(self.context, "conversation_manager", None)
+                    if cm is not None and umo:
+                        cid = cm.get_curr_conversation_id(umo)
+                        if inspect.isawaitable(cid):
+                            cid = await cid
+                        if cid:
+                            conv = cm.get_conversation(umo, cid)
+                            if inspect.isawaitable(conv):
+                                conv = await conv
+                            conv_persona_id = (
+                                conv.get("persona_id")
+                                if isinstance(conv, dict)
+                                else getattr(conv, "persona_id", None)
+                            )
+                except Exception as e:
+                    self._dbg("取会话绑定 persona_id 失败（继续走默认解析）: %s", e)
+
+                platform_name = str(umo).split(":", 1)[0] if ":" in str(umo or "") else ""
+
+                # 1) 优先走 AstrBot 正常回复同款的会话级解析
+                if hasattr(pm, "resolve_selected_persona"):
+                    try:
+                        res = pm.resolve_selected_persona(
+                            umo=umo,
+                            conversation_persona_id=conv_persona_id,
+                            platform_name=platform_name,
+                        )
+                        if inspect.isawaitable(res):
+                            res = await res
+                        if isinstance(res, tuple) and len(res) >= 2:
+                            resolved_id, persona = res[0], res[1]
+                        else:
+                            persona = res
+                            resolved_id = self._extract_persona_id(persona)
+                        persona_prompt = self._extract_persona_prompt(persona)
+                        if str(resolved_id or "") == "[%NONE]" and not persona_prompt:
+                            explicit_none = True
+                    except Exception as e:
+                        self._dbg("resolve_selected_persona 失败（回退兼容路径）: %s", e)
+
+                # 2) 老版本兼容：无 resolve_selected_persona 或未取到提示词时，优先按会话绑定 ID 取
+                if (
+                    not persona_prompt
+                    and not explicit_none
+                    and conv_persona_id
+                    and str(conv_persona_id) != "[%NONE]"
+                ):
+                    getter = getattr(pm, "get_persona_v3", None) or getattr(
+                        pm, "get_persona", None
+                    )
+                    if callable(getter):
+                        try:
+                            got = getter(conv_persona_id)
+                            if inspect.isawaitable(got):
+                                got = await got
+                            got_prompt = self._extract_persona_prompt(got)
+                            if got_prompt:
+                                persona_prompt = got_prompt
+                                resolved_id = conv_persona_id
+                        except Exception as e:
+                            self._dbg("按会话 persona_id 取人设失败: %s", e)
+
+                # 3) 兜底：AstrBot 旧接口 get_default_persona_v3(umo)
+                if (
+                    not persona_prompt
+                    and not explicit_none
+                    and hasattr(pm, "get_default_persona_v3")
+                ):
+                    got = pm.get_default_persona_v3(umo)
+                    if inspect.isawaitable(got):
+                        got = await got
+                    got_prompt = self._extract_persona_prompt(got)
+                    if got_prompt:
+                        persona_prompt = got_prompt
+                        resolved_id = self._extract_persona_id(got)
+
+                self._dbg(
+                    "主动消息人设解析: umo=%s id=%s len=%d explicit_none=%s",
+                    umo,
+                    resolved_id,
+                    len(persona_prompt),
+                    explicit_none,
+                )
         except Exception as e:
             self._dbg("取人设失败: %s", e)
+
         if persona_prompt:
             return persona_prompt
+        if explicit_none:
+            return ""
         return self._persona_cache.get(umo, "")
 
     def _recent_transcript(self, limit: int = 24) -> str:
@@ -5927,7 +6602,12 @@ class EmotionCore(Star):
         return "\n".join(out[-limit:])
 
     @staticmethod
-    def _hint_text(mode: str, drives: dict, angry_age_hours: float | None = None) -> str:
+    def _hint_text(
+        mode: str,
+        drives: dict,
+        angry_age_hours: float | None = None,
+        expectation: float = 0.0,
+    ) -> str:
         """档位倾向 + 心情倾向，拼成一句**注入给模型**的说话提示。
 
         给人看的短句走 `_hint_brief`——那边只描述状态，不带"该怎么说"，
@@ -5949,11 +6629,16 @@ class EmotionCore(Star):
                     "他提刚才的事再要说法，别主动讨好；只哄不解释不算翻篇；"
                     "可以冷，但别骂人、别威胁"
                 )
-        mood_key = mood_label(drives or {})
+        mood_key = mood_label(drives or {}, expectation)
         mood = MOOD_HINT.get(mood_key, "")
         if mode == MODE_ANGRY and mood_key in ("黏人", "想亲近"):
             # 生气时还想黏他，但这时候贴上去会像先低头；想他归想他，动作先收着。
             mood = "心里还惦记着他，但这会儿先不低头，别主动贴上去"
+        elif mode == MODE_ANGRY and mood_key == "着急":
+            mood = "心里急着想听他给个说法，但别先低头"
+        elif mode == MODE_SHUT and mood_key == "着急":
+            # 回避档要求不追问，不叠加“急切确认”
+            mood = ""
         elif mode != MODE_CALM and mood_key in ("黏人", "想亲近"):
             # 还在委屈/生气/害怕/回避时，"特别想黏着他、可以更主动"会和档位提示
             # （话说短、先问是不是嫌你烦）直接打架。想他归想他，动作先收着。
@@ -5967,14 +6652,14 @@ class EmotionCore(Star):
         return "；".join(parts)
 
     @staticmethod
-    def _hint_brief(mode: str, drives: dict) -> str:
+    def _hint_brief(mode: str, drives: dict, expectation: float = 0.0) -> str:
         """面板 / `/心 status` 用的短句：只描述她此刻的样子，不带"该怎么说话"。
 
         注入走 `_hint_text`（完整指令），给人看的地方走这里——
         否则面板上会出现"语气可以更软、也可以更主动；可以说一句想让他陪你，
         但别把它说成要求"这种写给模型看的话。
         """
-        mood = MOOD_BRIEF.get(mood_label(drives or {}), "")
+        mood = MOOD_BRIEF.get(mood_label(drives or {}, expectation), "")
         if mode == MODE_ANGRY and mood in ("这会儿特别想黏着他", "想再靠近一点"):
             return "在生气，但心里还惦记着他"
         if mood:
@@ -6116,7 +6801,7 @@ class EmotionCore(Star):
             "blame": round(float(st.get("blame_pressure", 0.0) or 0.0), 2),
             "expectation": round(float(st.get("expectation", 0.0) or 0.0), 2),
             "mode": mode_of(float(st.get("blame_pressure", 0.0) or 0.0)),
-            "mood": mood_label(drives),
+            "mood": mood_label(drives, float(st.get("expectation", 0.0) or 0.0)),
             "desire": round(float(st.get("desire", 0.0) or 0.0), 2),
             "desire_awakened": bool(st.get("desire_awakened")),
             "drives": {
@@ -6173,7 +6858,7 @@ class EmotionCore(Star):
                     "d": {k: round(v, 1) for k, v in top},
                 }
             )
-            self.state["recent_events"] = rows[-8:]
+            self.state["recent_events"] = rows[-24:]
         except Exception:
             pass
 
@@ -6310,20 +6995,40 @@ class EmotionCore(Star):
 
         注意路由格式：前端会把 endpoint 拼成
             /api/v1/plugins/extensions/{pluginName}/{endpoint}
-        后端再用 request_path = "/" + "{pluginName}/{endpoint}" 去匹配注册表，
-        所以路由**必须以插件标识开头**。这里用 <plugin> 通配符，
-        避免不同版本下 pluginName 是插件名还是别的 id 时对不上。
+        后端再用 request_path = "/" + "{pluginName}/{endpoint}" 对全局注册表做
+        正则匹配。这里**不能**用 `/<plugin>/...` 通配第一段——通配符会被编译成
+        `(?P<plugin>[^/]+)`，按注册顺序截胡其他插件的 `/<other>/state`、
+        `/<other>/tick`、`<other>/guarantee`，导致其他插件设置页报错。
+
+        因此只注册精确字面路由：标准插件名 + `/fish_heart/...` 兼容别名（若部署
+        目录名含 `fish_heart` 且与标准名不同，也以字面形式补充注册）。
         """
+        prefixes: list[str] = [PLUGIN_NAME, "fish_heart"]
+        dir_name = os.path.basename(os.path.dirname(os.path.abspath(__file__)))
+        if (
+            dir_name
+            and "fish_heart" in dir_name.lower()
+            and "/" not in dir_name
+            and "<" not in dir_name
+            and ">" not in dir_name
+            and dir_name not in prefixes
+        ):
+            prefixes.append(dir_name)
+
+        endpoints = [
+            ("state", self._web_state, ["GET"], "鱼的心：状态快照"),
+            ("tick", self._web_tick, ["POST"], "鱼的心：手动跳一次心跳"),
+            ("guarantee", self._web_guarantee, ["POST"], "鱼的心：开关睡前兜底"),
+        ]
         routes = [
-            ("/<plugin>/state", self._web_state, ["GET"], "鱼的心：状态快照"),
-            ("/<plugin>/tick", self._web_tick, ["POST"], "鱼的心：手动跳一次心跳"),
-            ("/<plugin>/guarantee", self._web_guarantee, ["POST"],
-             "鱼的心：开关睡前兜底"),
-            # 别名：pluginName 恰好是 fish_heart 时的兜底
-            ("/fish_heart/state", self._web_state, ["GET"], "鱼的心：状态快照（别名）"),
-            ("/fish_heart/tick", self._web_tick, ["POST"], "鱼的心：手动心跳（别名）"),
-            ("/fish_heart/guarantee", self._web_guarantee, ["POST"],
-             "鱼的心：开关睡前兜底（别名）"),
+            (
+                f"/{prefix}/{ep}",
+                handler,
+                methods,
+                desc if i == 0 else f"{desc}（别名）",
+            )
+            for i, prefix in enumerate(prefixes)
+            for ep, handler, methods, desc in endpoints
         ]
         try:
             for route, handler, methods, desc in routes:
@@ -6335,7 +7040,549 @@ class EmotionCore(Star):
             self.state["web_api_ready"] = True
             self.state["web_api_at"] = time.time()
             self._save_state()
-            logger.info("[鱼的心] Web 页面接口已注册：state / tick / guarantee（含通配与别名共 %d 条）", len(routes))
+            logger.info(
+                "[鱼的心] Web 页面接口已注册：state / tick / guarantee（前缀 %s，共 %d 条）",
+                ", ".join(prefixes),
+                len(routes),
+            )
+
+    # ---------------- 特别的日子（生日与纪念日） ----------------
+
+    def _special_state(self) -> dict:
+        """确保 state['special_days'] 结构完整（兼容旧版 state.json）。"""
+        st = self.state
+        sd = st.get("special_days")
+        if not isinstance(sd, dict):
+            sd = {}
+            st["special_days"] = sd
+        if not isinstance(sd.get("overrides"), dict):
+            sd["overrides"] = {}
+        if not isinstance(sd.get("custom"), list):
+            sd["custom"] = []
+        if not isinstance(sd.get("settled_ids"), list):
+            sd["settled_ids"] = []
+        if not isinstance(sd.get("wished_ids"), list):
+            sd["wished_ids"] = []
+        sd.setdefault("settled_day", "")
+        sd.setdefault("wished_day", "")
+        sd.setdefault("fish_bday_wished_day", "")
+        sd.setdefault("last_wish_try_ts", 0.0)
+        return sd
+
+    def _special_core_value(self, field: str, cfg_val: str) -> str:
+        """读取核心日期：优先聊天命令覆盖；若之后在配置页改过值，自动以新配置为准。"""
+        cfg_norm = str(cfg_val or "").strip()
+        sd = self._special_state()
+        ov_book = sd["overrides"]
+        entry = ov_book.get(field)
+        if isinstance(entry, dict):
+            if str(entry.get("cfg_at_set") or "") != cfg_norm:
+                ov_book.pop(field, None)
+                return cfg_norm
+            val = str(entry.get("val") or "").strip()
+            if val:
+                return val
+        elif isinstance(entry, str) and entry.strip():
+            return entry.strip()
+        return cfg_norm
+
+    def _special_days_snapshot(self, now_dt: datetime | None = None) -> dict:
+        """读取配置与聊天命令的特别日，返回当天的汇总快照。"""
+        enabled = bool(self._cfg("special_days.enabled", True))
+        cfg_ob = str(self._cfg("special_days.owner_birthday", "") or "").strip()
+        cfg_fb = str(self._cfg("special_days.fish_birthday", "") or "").strip()
+        cfg_met = str(self._cfg("special_days.met_date", "") or "").strip()
+        cfg_custom = self._cfg("special_days.custom", [])
+        preheat = int(self._cfg("special_days.preheat_days", 3) or 0)
+        if not enabled or special_days_mod is None:
+            return {
+                "today_str": (now_dt or datetime.now()).strftime("%Y-%m-%d"),
+                "has_any": False,
+                "met_days": 0,
+                "met_date": "",
+                "items": [],
+                "today_items": [],
+                "preheat_items": [],
+                "nearest": None,
+            }
+        sd = self._special_state()
+        return special_days_mod.evaluate_special_days(
+            owner_birthday=self._special_core_value("owner_birthday", cfg_ob),
+            fish_birthday=self._special_core_value("fish_birthday", cfg_fb),
+            met_date=self._special_core_value("met_date", cfg_met),
+            custom_config=cfg_custom if isinstance(cfg_custom, list) else [],
+            custom_chat=sd.get("custom") or [],
+            preheat_days=preheat,
+            now_dt=now_dt,
+        )
+
+    def _is_fish_bday_wished_today(self, today_str: str) -> bool:
+        sd = self._special_state()
+        return bool(today_str and str(sd.get("fish_bday_wished_day") or "") == today_str)
+
+    def _special_day_injection(self, now_dt: datetime | None = None) -> tuple[str, str]:
+        if special_days_mod is None:
+            return "", ""
+        now = now_dt or datetime.now()
+        snap = self._special_days_snapshot(now)
+        if not snap.get("has_any"):
+            return "", ""
+        wished = self._is_fish_bday_wished_today(str(snap.get("today_str") or ""))
+        return special_days_mod.build_injection_line(
+            snap, fish_bday_wished=wished, now_dt=now
+        )
+
+    def _sync_special_day_mood(self, now_dt: datetime | None = None) -> list[str]:
+        """当天首次进入特别的日子时，轻推一次情绪（每天每项最多一次）。"""
+        snap = self._special_days_snapshot(now_dt)
+        today_items = snap.get("today_items") or []
+        if not today_items:
+            return []
+        today_str = str(snap.get("today_str") or "")
+        sd = self._special_state()
+        if sd.get("settled_day") != today_str:
+            sd["settled_day"] = today_str
+            sd["settled_ids"] = []
+        settled_ids = list(sd.get("settled_ids") or [])
+        st = self.state
+        drives = st["drives"]
+        newly: list[str] = []
+        for it in today_items:
+            item_id = str(it.get("id") or "")
+            if not item_id or item_id in settled_ids:
+                continue
+            kind = str(it.get("kind") or "")
+            name = str(it.get("name") or "")
+            if kind == "fish_birthday":
+                if not self._is_fish_bday_wished_today(today_str):
+                    drives["joy"] = clamp(float(drives.get("joy", 50.0)) + 3.0)
+                    st["expectation"] = clamp(float(st.get("expectation", 0.0)) + 25.0)
+                    self._note_event("今天是我的生日", {"joy": 3.0}, 1.0)
+            else:
+                drives["joy"] = clamp(float(drives.get("joy", 50.0)) + 6.0)
+                drives["attachment"] = clamp(float(drives.get("attachment", 50.0)) + 4.0)
+                drives["intimacy"] = clamp(float(drives.get("intimacy", 50.0)) + 3.0)
+                label = f"今天是{name}" if name and not name.startswith("相识") else (name or "特别的日子")
+                self._note_event(
+                    label, {"joy": 6.0, "attachment": 4.0, "intimacy": 3.0}, 1.0
+                )
+            settled_ids.append(item_id)
+            newly.append(item_id)
+        sd["settled_ids"] = settled_ids
+        return newly
+
+    def _handle_fish_birthday_wish(
+        self, text: str, now_dt: datetime | None = None
+    ) -> bool:
+        """鱼自己生日当天，鱼主说「生日快乐」时触发专属开心结算。"""
+        if special_days_mod is None or not text:
+            return False
+        snap = self._special_days_snapshot(now_dt)
+        today_str = str(snap.get("today_str") or "")
+        has_fish_bday = any(
+            str(it.get("kind") or "") == "fish_birthday"
+            for it in (snap.get("today_items") or [])
+        )
+        if not has_fish_bday or self._is_fish_bday_wished_today(today_str):
+            return False
+        if not special_days_mod.is_fish_birthday_wish(text):
+            return False
+        sd = self._special_state()
+        sd["fish_bday_wished_day"] = today_str
+        st = self.state
+        drives = st["drives"]
+        drives["joy"] = clamp(float(drives.get("joy", 50.0)) + 12.0)
+        drives["attachment"] = clamp(float(drives.get("attachment", 50.0)) + 8.0)
+        drives["intimacy"] = clamp(float(drives.get("intimacy", 50.0)) + 6.0)
+        st["expectation"] = 0.0
+        blame = float(st.get("blame_pressure", 0.0) or 0.0)
+        if blame > 0:
+            st["blame_pressure"] = clamp(blame - 20.0)
+            if float(st["blame_pressure"]) < 25.0:
+                st["mind_knot"] = False
+        self._note_event(
+            "他记得我的生日",
+            {"joy": 12.0, "attachment": 8.0, "intimacy": 6.0},
+            1.0,
+        )
+        return True
+
+    def _due_special_day_wish(
+        self, now_dt: datetime | None = None
+    ) -> tuple[dict | None, int]:
+        """找出今天还没发过主动祝福的第一个可祝福特别日。"""
+        if not bool(self._cfg("special_days.proactive_wish", True)):
+            return None, 0
+        snap = self._special_days_snapshot(now_dt)
+        today_items = snap.get("today_items") or []
+        if not today_items:
+            return None, 0
+        today_str = str(snap.get("today_str") or "")
+        sd = self._special_state()
+        wished = set(sd.get("wished_ids") or []) if sd.get("wished_day") == today_str else set()
+        for it in today_items:
+            if not it.get("can_proactive_wish"):
+                continue
+            if str(it.get("id") or "") in wished:
+                continue
+            return it, int(snap.get("met_days") or 0)
+        return None, 0
+
+    def _handle_special_day_cmd(self, rest: str) -> str:
+        """处理 `/心 纪念日` / `/心 day` 子命令。"""
+        if special_days_mod is None:
+            return "特别的日子模块未加载，请检查插件文件是否完整。"
+        parts = (rest or "").strip().split()
+        sub = parts[0].lower() if parts else ""
+        sd = self._special_state()
+
+        if not sub or sub in ("list", "ls", "status"):
+            snap = self._special_days_snapshot()
+            enabled = bool(self._cfg("special_days.enabled", True))
+            lines = [f"【特别的日子】{'已开启' if enabled else '已关闭'}"]
+            if int(snap.get("met_days") or 0) > 0:
+                lines.append(
+                    f"相识纪念：第 {int(snap['met_days'])} 天（自 {snap.get('met_date', '')} 起）"
+                )
+            items = snap.get("items") or []
+            if not items:
+                lines.append("还没有设置生日或纪念日。")
+            else:
+                for idx, it in enumerate(items, 1):
+                    left = int(it.get("days_left") or 0)
+                    when = "就是今天！" if left == 0 else f"还有 {left} 天（{it.get('next_date', '')}）"
+                    tag = " [聊天添加]" if it.get("source") == "chat" else ""
+                    lines.append(f"{idx}. {it.get('name', '')}（{it.get('date', '')}）— {when}{tag}")
+            lines.append("")
+            lines.append("用法：")
+            lines.append("/心 纪念日 set 鱼主生日|鱼生日|相识日 <日期|clear>")
+            lines.append("/心 纪念日 add <日期> <名称>")
+            lines.append("/心 纪念日 del <名称或序号>")
+            return "\n".join(lines)
+
+        if sub == "set":
+            if len(parts) < 3:
+                return "用法：/心 纪念日 set 鱼主生日|鱼生日|相识日 <MM-DD 或 YYYY-MM-DD 或 clear>"
+            raw_field = parts[1].strip()
+            field = special_days_mod.CORE_FIELD_ALIASES.get(raw_field) or special_days_mod.CORE_FIELD_ALIASES.get(raw_field.lower())
+            if not field:
+                return "可设字段：鱼主生日 / 鱼生日 / 相识日"
+            val_raw = parts[2].strip()
+            cn = special_days_mod.CORE_FIELD_CN.get(field, field)
+            if val_raw.lower() in ("clear", "none", "del", "清除", "清空"):
+                sd["overrides"].pop(field, None)
+                self._save_state()
+                return f"已清除聊天里设置的「{cn}」（若配置页填了仍以配置页为准）。"
+            spec = special_days_mod.parse_date_spec(val_raw)
+            if not spec:
+                return f"日期格式不对：{val_raw!r}。请用 MM-DD 或 YYYY-MM-DD（如 08-15、2025-05-20）。"
+            cfg_now = str(self._cfg(f"special_days.{field}", "") or "").strip()
+            sd["overrides"][field] = {"val": spec["norm"], "cfg_at_set": cfg_now}
+            self._save_state()
+            return f"已记下「{cn}」：{spec['norm']}。"
+
+        if sub == "add":
+            if len(parts) < 3:
+                return "用法：/心 纪念日 add <日期> <名称>（如 /心 纪念日 add 10-01 第一次见面）"
+            spec = special_days_mod.parse_date_spec(parts[1])
+            if not spec:
+                return f"日期格式不对：{parts[1]!r}。请用 MM-DD 或 YYYY-MM-DD（如 10-01、2026-06-07）。"
+            name = " ".join(parts[2:]).strip()[:30]
+            if not name:
+                return "请给这个特别日写一个名字。"
+            custom = list(sd.get("custom") or [])
+            for row in custom:
+                if isinstance(row, dict) and str(row.get("name") or "") == name:
+                    row["date"] = spec["norm"]
+                    sd["custom"] = custom
+                    self._save_state()
+                    return f"已更新特别日「{name}」为 {spec['norm']}。"
+            custom.append({"date": spec["norm"], "name": name})
+            sd["custom"] = custom[-30:]
+            self._save_state()
+            return f"已记下特别日「{name}」（{spec['norm']}）。"
+
+        if sub in ("del", "rm", "remove", "删除"):
+            if len(parts) < 2:
+                return "用法：/心 纪念日 del <名称或聊天添加序号>"
+            target = " ".join(parts[1:]).strip()
+            custom = list(sd.get("custom") or [])
+            if not custom:
+                return "聊天里还没有手动添加过特别日（配置页里的请在插件配置页删）。"
+            # 优先按精确名称删
+            for idx, row in enumerate(custom):
+                if isinstance(row, dict) and str(row.get("name") or "") == target:
+                    removed = custom.pop(idx)
+                    sd["custom"] = custom
+                    self._save_state()
+                    return f"已移出特别日「{removed.get('name', '')}」（{removed.get('date', '')}）。"
+            # 其次按全局列表序号删（仅允许删 source == 'chat'）
+            if target.isdigit():
+                pos = int(target)
+                snap_items = self._special_days_snapshot().get("items") or []
+                if 1 <= pos <= len(snap_items):
+                    picked = snap_items[pos - 1]
+                    if picked.get("source") != "chat":
+                        return f"第 {pos} 条「{picked.get('name', '')}」来自插件配置页，请在配置页修改。"
+                    raw_name = str(picked.get("raw_name") or picked.get("name") or "")
+                    for idx, row in enumerate(custom):
+                        if isinstance(row, dict) and str(row.get("name") or "") == raw_name:
+                            removed = custom.pop(idx)
+                            sd["custom"] = custom
+                            self._save_state()
+                            return f"已移出特别日「{removed.get('name', '')}」（{removed.get('date', '')}）。"
+            return f"没找到聊天里添加的特别日：{target!r}。发 /心 纪念日 查看当前列表。"
+
+        return (
+            "用法：\n"
+            "/心 纪念日 — 查看全部特别日\n"
+            "/心 纪念日 set 鱼主生日|鱼生日|相识日 <日期|clear>\n"
+            "/心 纪念日 add <日期> <名称>\n"
+            "/心 纪念日 del <名称或序号>"
+        )
+
+    # ---------------- 每日小气象（心情底色） ----------------
+
+    def _ensure_daily_vibe(
+        self, force_reroll: bool = False, now_dt: datetime | None = None
+    ) -> dict | None:
+        """确保今天有一枚稳定的小气象；跨天自动重掷，force_reroll 时换一枚不同的。"""
+        if not bool(self._cfg("daily_vibe.enabled", True)) or daily_vibe_mod is None:
+            return None
+        today = (now_dt or datetime.now()).strftime("%Y-%m-%d")
+        st = self.state
+        vb = st.get("daily_vibe")
+        if not isinstance(vb, dict):
+            vb = {"day": "", "key": ""}
+            st["daily_vibe"] = vb
+        cur_key = str(vb.get("key") or "")
+        if not force_reroll and str(vb.get("day") or "") == today:
+            meta = daily_vibe_mod.get_vibe(cur_key)
+            if meta:
+                return meta
+        picked = daily_vibe_mod.pick_daily_vibe(
+            st.get("drives") or {},
+            prev_key=cur_key,
+            exclude_key=cur_key if force_reroll else "",
+        )
+        vb["day"] = today
+        vb["key"] = str(picked.get("key") or "")
+        return picked
+
+    def _daily_vibe_injection(
+        self, mode: str, drives: dict
+    ) -> tuple[str, str]:
+        if not bool(self._cfg("daily_vibe.enabled", True)) or daily_vibe_mod is None:
+            return "", ""
+        meta = self._ensure_daily_vibe()
+        if not meta:
+            return "", ""
+        return daily_vibe_mod.build_vibe_injection(
+            str(meta.get("key") or ""), mode, drives
+        )
+
+    def _handle_vibe_cmd(self, rest: str) -> str:
+        """处理 `/心 气象` / `/心 vibe` 子命令。"""
+        if daily_vibe_mod is None:
+            return "每日小气象模块未加载，请检查插件文件是否完整。"
+        if not bool(self._cfg("daily_vibe.enabled", True)):
+            return "每日小气象当前已关闭（可在插件配置页开启 daily_vibe.enabled）。"
+        sub = (rest or "").strip().lower()
+        reroll = sub in ("换", "reroll", "roll", "new", "换一个", "重掷")
+        meta = self._ensure_daily_vibe(force_reroll=reroll)
+        if not meta:
+            return "暂时没有读取到今日小气象。"
+        if reroll:
+            self._save_state()
+        mode = mode_of(float(self.state.get("blame_pressure", 0.0)))
+        suppressed = daily_vibe_mod.is_vibe_suppressed(mode, self.state.get("drives") or {})
+        prefix = "已换一个今日小气象" if reroll else "今日小气象"
+        extra = "\n（当前处于生气/回避或高压高疲惫，底色已自动隐身，不会强行出戏。）" if suppressed else ""
+        return (
+            f"【{prefix}】{meta.get('label', '')}\n"
+            f"底色：{meta.get('hint', '')}{extra}\n\n"
+            "发 /心 气象 换 可手动换一枚今天的底色。"
+        )
+
+    # ---------------- 小约定（短期承诺挂念） ----------------
+
+    def _prune_promises(self, now_ts: float | None = None) -> list[dict]:
+        """清理过期小约定并截断上限。"""
+        if promises_mod is None:
+            return []
+        expire_days = int(self._cfg("promises.expire_days", 14) or 14)
+        max_active = int(self._cfg("promises.max_active", 3) or 3)
+        rows = promises_mod.prune_promises(
+            self.state.get("promises") or [],
+            now_ts=now_ts,
+            expire_days=expire_days,
+            max_active=max_active,
+        )
+        self.state["promises"] = rows
+        return rows
+
+    def _add_promise(
+        self, text: str, *, src: str = "manual", now_ts: float | None = None
+    ) -> tuple[bool, str]:
+        """记下一条小约定（带去重与上限裁剪）。"""
+        if not bool(self._cfg("promises.enabled", True)) or promises_mod is None:
+            return False, "小约定功能当前已关闭。"
+        body = str(text or "").strip()[:30]
+        if len(body) < 2:
+            return False, "请写清楚约定内容（至少 2 个字）。"
+        now = float(now_ts if now_ts is not None else time.time())
+        rows = self._prune_promises(now)
+        for row in rows:
+            if promises_mod.is_similar_promise(str(row.get("text") or ""), body):
+                return False, f"已经有相似的小约定了：「{row.get('text', '')}」。"
+        kws = promises_mod.extract_keywords(body)
+        rows.append({"text": body, "ts": now, "src": src, "kws": kws})
+        max_active = int(self._cfg("promises.max_active", 3) or 3)
+        self.state["promises"] = rows[-max(1, min(10, max_active)):]
+        return True, f"已记下小约定：「{body}」。"
+
+    def _complete_promise(self, target_row: dict) -> str:
+        """把某条小约定标为兑现并结算正向情绪。"""
+        txt = str(target_row.get("text") or "").strip()
+        rows = [
+            r for r in (self.state.get("promises") or [])
+            if isinstance(r, dict) and r is not target_row and str(r.get("text") or "") != txt
+        ]
+        self.state["promises"] = rows
+        drives = self.state["drives"]
+        drives["joy"] = clamp(float(drives.get("joy", 50.0)) + 10.0)
+        drives["attachment"] = clamp(float(drives.get("attachment", 50.0)) + 6.0)
+        drives["intimacy"] = clamp(float(drives.get("intimacy", 50.0)) + 5.0)
+        self._note_event(
+            f"兑现了小约定（{txt[:12]}）" if txt else "兑现了小约定",
+            {"joy": 10.0, "attachment": 6.0, "intimacy": 5.0},
+            1.0,
+        )
+        return txt
+
+    def _try_complete_promise(self, text: str) -> bool:
+        """私聊里自动判断鱼主是否兑现了某条活跃小约定。"""
+        if not bool(self._cfg("promises.enabled", True)) or promises_mod is None:
+            return False
+        rows = self._prune_promises()
+        if not rows:
+            return False
+        hit = promises_mod.match_completed_promise(text, rows)
+        if not hit:
+            return False
+        done_txt = self._complete_promise(hit)
+        self._dbg("自动识别兑现小约定：%s", done_txt)
+        return True
+
+    def _try_capture_promise(self, text: str) -> bool:
+        """私聊里尝试自动捕捉明确的短期承诺。"""
+        if (
+            not bool(self._cfg("promises.enabled", True))
+            or not bool(self._cfg("promises.auto_capture", True))
+            or promises_mod is None
+        ):
+            return False
+        body = promises_mod.extract_promise(text)
+        if not body:
+            return False
+        ok, _ = self._add_promise(body, src="auto")
+        if ok:
+            self._dbg("自动记下小约定：%s", body)
+        return ok
+
+    def _promise_injection(
+        self, mode: str, *, has_today_special: bool = False, now_ts: float | None = None
+    ) -> tuple[str, str]:
+        if not bool(self._cfg("promises.enabled", True)) or promises_mod is None:
+            return "", ""
+        rows = self._prune_promises(now_ts)
+        if not rows:
+            return "", ""
+        return promises_mod.build_promise_injection(
+            rows,
+            now_ts=now_ts,
+            mode=mode,
+            has_today_special=has_today_special,
+        )
+
+    def _handle_promise_cmd(self, rest: str) -> str:
+        """处理 `/心 约定` / `/心 promise` 子命令。"""
+        if promises_mod is None:
+            return "小约定模块未加载，请检查插件文件是否完整。"
+        parts = (rest or "").strip().split()
+        sub = parts[0].lower() if parts else ""
+        enabled = bool(self._cfg("promises.enabled", True))
+        rows = self._prune_promises()
+
+        if not sub or sub in ("list", "ls", "status"):
+            lines = [f"【小约定】{'已开启' if enabled else '已关闭'}（活跃 {len(rows)} 条）"]
+            if not rows:
+                lines.append("现在心里没有挂着的小约定。")
+            else:
+                now = time.time()
+                for idx, r in enumerate(rows, 1):
+                    days = int(max(0.0, now - float(r.get("ts", 0) or 0)) // 86400)
+                    age = "今天" if days == 0 else f"{days} 天前"
+                    tag = " [自动记住]" if r.get("src") == "auto" else ""
+                    lines.append(f"{idx}. {r.get('text', '')}（{age}{tag}）")
+            lines.append("")
+            lines.append("用法：")
+            lines.append("/心 约定 add <内容> — 手动记一条小约定")
+            lines.append("/心 约定 done <序号或关键词> — 标记已兑现")
+            lines.append("/心 约定 del <序号或关键词> — 删掉一条")
+            return "\n".join(lines)
+
+        if sub == "add":
+            body = " ".join(parts[1:]).strip()
+            ok, msg = self._add_promise(body, src="manual")
+            if ok:
+                self._save_state()
+            return msg
+
+        if sub in ("done", "完成", "兑现"):
+            if len(parts) < 2:
+                return "用法：/心 约定 done <序号或关键词>"
+            target = " ".join(parts[1:]).strip()
+            picked = self._find_promise(rows, target)
+            if not picked:
+                return f"没找到对应的小约定：{target!r}。发 /心 约定 查看当前列表。"
+            done_txt = self._complete_promise(picked)
+            self._save_state()
+            return f"小约定「{done_txt}」已兑现！她心里很开心（喜悦 +10 · 依恋 +6 · 亲密 +5）。"
+
+        if sub in ("del", "rm", "remove", "删除"):
+            if len(parts) < 2:
+                return "用法：/心 约定 del <序号或关键词>"
+            target = " ".join(parts[1:]).strip()
+            picked = self._find_promise(rows, target)
+            if not picked:
+                return f"没找到对应的小约定：{target!r}。发 /心 约定 查看当前列表。"
+            txt = str(picked.get("text") or "")
+            self.state["promises"] = [r for r in rows if r is not picked]
+            self._save_state()
+            return f"已删掉小约定：「{txt}」。"
+
+        return (
+            "用法：\n"
+            "/心 约定 — 查看当前小约定\n"
+            "/心 约定 add <内容>\n"
+            "/心 约定 done <序号或关键词>\n"
+            "/心 约定 del <序号或关键词>"
+        )
+
+    @staticmethod
+    def _find_promise(rows: list[dict], target: str) -> dict | None:
+        if not rows or not target:
+            return None
+        if target.isdigit():
+            pos = int(target)
+            if 1 <= pos <= len(rows):
+                return rows[pos - 1]
+        low = target.lower()
+        for r in rows:
+            if low in str(r.get("text") or "").lower():
+                return r
+        return None
 
     def _state_payload(self) -> dict:
         """把内部状态整理成页面用的 JSON。"""
@@ -6429,11 +7676,68 @@ class EmotionCore(Star):
             if isinstance(r, dict)
         ]
         sleep = self._sleep_info()
+        win = self._fixed_window_info()
+        sched_mode = self._proactive_schedule_mode()
         pf_level, pf_count = self._praise_fatigue_state("owner")
+        sd_snap = self._special_days_snapshot()
+        vibe_enabled = bool(self._cfg("daily_vibe.enabled", True))
+        vibe_meta = self._ensure_daily_vibe() if vibe_enabled else None
+        vibe_suppressed = (
+            bool(daily_vibe_mod.is_vibe_suppressed(mode, st.get("drives") or {}))
+            if vibe_meta and daily_vibe_mod is not None
+            else False
+        )
+        promises_enabled = bool(self._cfg("promises.enabled", True))
+        active_promises = self._prune_promises(now_ts) if promises_enabled else []
         return {
             "version": st.get("version"),
             "plugin_version": VERSION,
             "now": now_ts,
+            "daily_vibe": {
+                "enabled": vibe_enabled,
+                "key": str((vibe_meta or {}).get("key") or ""),
+                "label": str((vibe_meta or {}).get("label") or ""),
+                "short": str((vibe_meta or {}).get("short") or ""),
+                "hint": str((vibe_meta or {}).get("hint") or ""),
+                "suppressed": vibe_suppressed,
+            },
+            "promises_enabled": promises_enabled,
+            "promises": [
+                {
+                    "text": str(p.get("text") or ""),
+                    "ts": float(p.get("ts", 0) or 0),
+                    "src": str(p.get("src") or "auto"),
+                }
+                for p in active_promises
+            ],
+            "special_days": {
+                "enabled": bool(self._cfg("special_days.enabled", True)),
+                "has_any": bool(sd_snap.get("has_any")),
+                "met_days": int(sd_snap.get("met_days") or 0),
+                "met_date": str(sd_snap.get("met_date") or ""),
+                "today_items": [
+                    {
+                        "id": str(x.get("id") or ""),
+                        "kind": str(x.get("kind") or ""),
+                        "name": str(x.get("name") or ""),
+                        "date": str(x.get("date") or ""),
+                    }
+                    for x in (sd_snap.get("today_items") or [])
+                ],
+                "nearest": (
+                    {
+                        "id": str(sd_snap["nearest"].get("id") or ""),
+                        "kind": str(sd_snap["nearest"].get("kind") or ""),
+                        "name": str(sd_snap["nearest"].get("name") or ""),
+                        "date": str(sd_snap["nearest"].get("date") or ""),
+                        "days_left": int(sd_snap["nearest"].get("days_left") or 0),
+                    }
+                    if sd_snap.get("nearest") else None
+                ),
+                "fish_bday_wished": self._is_fish_bday_wished_today(
+                    str(sd_snap.get("today_str") or "")
+                ),
+            },
             "praise_fatigue": {
                 "level": pf_level,
                 "count": pf_count,
@@ -6459,15 +7763,23 @@ class EmotionCore(Star):
             },
             "recent_rewards": _fresh_list(st.get("recent_rewards")),
             "last_let_go": _fresh(st.get("last_let_go")),
-            "mood_cn": mood_label(st.get("drives") or {}),
-            "hint": self._hint_brief(mode, st.get("drives") or {}),
+            "mood_cn": mood_label(
+                st.get("drives") or {}, float(st.get("expectation", 0.0) or 0.0)
+            ),
+            "hint": self._hint_brief(
+                mode, st.get("drives") or {}, float(st.get("expectation", 0.0) or 0.0)
+            ),
             "desire_awakened": bool(st.get("desire_awakened")),
+            "desire_unsatisfied": self._is_desire_unsatisfied(),
             "desire": (
                 round(float(st.get("desire", 0.0) or 0.0), 1)
                 if st.get("desire_awakened") else None
             ),
             "desire_stage": (
-                self._desire_stage(float(st.get("desire", 0.0) or 0.0))
+                self._desire_stage(
+                    float(st.get("desire", 0.0) or 0.0),
+                    unsatisfied=self._is_desire_unsatisfied(),
+                )
                 if st.get("desire_awakened") else ""
             ),
             "desire_adult_status": self._desire_adult_status(),
@@ -6530,9 +7842,12 @@ class EmotionCore(Star):
                 "cooldown_hours": float(self._cfg("proactive.cooldown_hours", 6.0)),
                 "daily_limit": int(self._cfg("proactive.daily_limit", 4)),
                 "min_idle_minutes": float(self._cfg("proactive.min_idle_minutes", 10)),
-                "daily_guarantee": bool(
-                    self._cfg("proactive.daily_guarantee", False)
-                ),
+                "daily_guarantee": sched_mode == "daily_guarantee",
+                "schedule_mode": sched_mode,
+                "window_start": win["start"],
+                "window_end": win["end"],
+                "fixed_window_valid": bool(win["valid"]),
+                "in_fixed_window": bool(win["in_window"]),
                 "target_umo": str(self._cfg("proactive.target_umo", "")),
                 "segment_reply": bool(self._cfg("proactive.segment_reply", True)),
                 "company": bool(self._cfg("proactive.company", True)),
@@ -6570,7 +7885,7 @@ class EmotionCore(Star):
                     "ts": float(e.get("ts", 0) or 0),
                     "d": e.get("d") or {},
                 }
-                for e in (st.get("recent_events") or [])[-8:]
+                for e in (st.get("recent_events") or [])[-24:]
             ],
         }
 
@@ -6639,12 +7954,15 @@ class EmotionCore(Star):
             return {"ok": False, "error": str(e), "data": {}}
 
     async def _web_guarantee(self, **kwargs) -> dict:
-        """面板开关：睡前兜底。不带参数就是取反，方便只做一次点击。"""
+        """面板开关：睡前兜底（同步更新 proactive.schedule_mode）。不带参数就是取反。"""
         try:
-            cur = bool(self._cfg("proactive.daily_guarantee", False))
+            cur = self._proactive_schedule_mode() == "daily_guarantee"
             want = kwargs.get("enabled")
             new = (not cur) if want is None else bool(want)
             self._cfg_set_path("proactive.daily_guarantee", new)
+            self._cfg_set_path(
+                "proactive.schedule_mode", "daily_guarantee" if new else "none"
+            )
             saved = self._cfg_save()
             payload = self._state_payload()
             payload["guarantee_saved"] = saved
@@ -6789,6 +8107,8 @@ class EmotionCore(Star):
                     )
                 else:
                     lines.append("当前状态：已暂停（说“可以/继续”或 /adult on 恢复）")
+            elif self._is_desire_unsatisfied():
+                lines.append("当前状态：欲求不满（欲已满溢，会主动推倒/撩拨）")
             lines.append("欲的数值不显示。")
             yield event.plain_result("\n".join(lines))
             return
@@ -6797,9 +8117,10 @@ class EmotionCore(Star):
 
     @filter.command("心")
     async def emotion_cmd(self, event: AstrMessageEvent):
-        """查看 / 管理当前心境。用法：/心 status|calm|reset|tick|off|on|umo"""
+        """查看 / 管理当前心境。用法：/心 status|calm|reset|tick|off|on|umo|day"""
         raw = (getattr(event, "message_str", "") or "").strip()
-        arg = raw.split(maxsplit=1)[1].strip().lower() if len(raw.split(maxsplit=1)) > 1 else "status"
+        raw_arg = raw.split(maxsplit=1)[1].strip() if len(raw.split(maxsplit=1)) > 1 else "status"
+        arg = raw_arg.lower()
         umo = self._umo_of(event)
 
         if not self._can_use_commands(event, umo, arg):
@@ -6830,8 +8151,14 @@ class EmotionCore(Star):
             yield event.plain_result("责怪已清零，档位回到日常（九维没动）。")
             return
         if arg in ("reset", "r"):
+            old_sd = self.state.get("special_days") if isinstance(self.state.get("special_days"), dict) else {}
             self.state = new_state()
             self.state["umo"] = umo
+            # 重置心境不丢聊天里记下的生日和纪念日
+            if old_sd.get("overrides"):
+                self.state["special_days"]["overrides"] = dict(old_sd["overrides"])
+            if old_sd.get("custom"):
+                self.state["special_days"]["custom"] = list(old_sd["custom"])
             self._save_state()
             yield event.plain_result("心境已重置为初始状态。")
             return
@@ -6866,7 +8193,20 @@ class EmotionCore(Star):
                 "填到「主动说话→目标会话」即可指定这里。"
             )
             return
-        yield event.plain_result("用法：/心 status | calm | reset | tick | off | on | umo")
+        head = raw_arg.split(maxsplit=1)[0].lower()
+        if head in ("day", "days", "纪念日", "生日", "特别日"):
+            rest = raw_arg.split(maxsplit=1)[1].strip() if len(raw_arg.split(maxsplit=1)) > 1 else ""
+            yield event.plain_result(self._handle_special_day_cmd(rest))
+            return
+        if head in ("vibe", "气象", "小气象", "底色"):
+            rest = raw_arg.split(maxsplit=1)[1].strip() if len(raw_arg.split(maxsplit=1)) > 1 else ""
+            yield event.plain_result(self._handle_vibe_cmd(rest))
+            return
+        if head in ("promise", "promises", "约定", "小约定"):
+            rest = raw_arg.split(maxsplit=1)[1].strip() if len(raw_arg.split(maxsplit=1)) > 1 else ""
+            yield event.plain_result(self._handle_promise_cmd(rest))
+            return
+        yield event.plain_result("用法：/心 status | calm | reset | tick | off | on | umo | 纪念日 | 气象 | 约定")
 
     def _status_text(self, is_group: bool | None = None) -> str:
         st = self.state
@@ -6875,7 +8215,7 @@ class EmotionCore(Star):
         mode = mode_of(blame)
         knot = bool(st.get("mind_knot"))
         label = MODE_CN[mode] + ("·心结旧账" if knot and mode == MODE_WRONGED else "")
-        mood = mood_label(drives)
+        mood = mood_label(drives, float(st.get("expectation", 0.0) or 0.0))
         head = f"【鱼的心 v{VERSION}】心情：{mood}"
         mode_line = f"责怪档：{label}｜责怪 {blame:.0f}/100"
         # 40 以下是会褪干净的正常责怪；一旦高过 40，最后会卡在 40（心结）。
@@ -6986,7 +8326,11 @@ class EmotionCore(Star):
                 lines.append("今日收益：" + "｜".join(parts))
         lines.append("")
         for k in DRIVES:
-            lines.append(f"{DRIVE_CN[k]} {drives[k]:5.1f} {fmt_bar(drives[k])}")
+            val = float(drives[k])
+            line = f"{DRIVE_CN[k]} {val:5.1f} {fmt_bar(val)}"
+            if k in DIM_DISPLAY_MAX:
+                line += f"（面板 {norm_panel_int(val, DIM_DISPLAY_MAX[k])}）"
+            lines.append(line)
         for line in _thought_summary(st.get("thoughts") or []):
             lines.append("")
             lines.append(line)
@@ -6995,6 +8339,34 @@ class EmotionCore(Star):
             lines.append("")
             lines.append(f"上次主动说话：{datetime.fromtimestamp(last_p):%m-%d %H:%M}"
                          f"（今日 {int(st.get('proactive_count', 0))} 次）")
+        sd_snap = self._special_days_snapshot()
+        if sd_snap.get("has_any"):
+            sd_bits = []
+            if int(sd_snap.get("met_days") or 0) > 0:
+                sd_bits.append(f"相识第 {int(sd_snap['met_days'])} 天")
+            today_it = (sd_snap.get("today_items") or [])
+            if today_it:
+                sd_bits.append("今天：" + " / ".join(str(x.get("name") or "") for x in today_it[:2]))
+            elif sd_snap.get("nearest"):
+                nr = sd_snap["nearest"]
+                sd_bits.append(f"距「{nr.get('name', '')}」还有 {int(nr.get('days_left', 0))} 天")
+            if sd_bits:
+                lines.append("特别的日子：" + " · ".join(sd_bits))
+        vb_meta = self._ensure_daily_vibe()
+        if vb_meta:
+            vb_sup = (
+                "（当前隐身）"
+                if daily_vibe_mod is not None
+                and daily_vibe_mod.is_vibe_suppressed(mode, drives)
+                else ""
+            )
+            lines.append(f"今日小气象：{vb_meta.get('label', '')}{vb_sup}")
+        if bool(self._cfg("promises.enabled", True)):
+            p_rows = self._prune_promises()
+            if p_rows:
+                preview = "、".join(str(p.get("text") or "") for p in p_rows[:2])
+                more = f" 等 {len(p_rows)} 条" if len(p_rows) > 2 else ""
+                lines.append(f"小约定：{preview}{more}")
         return "\n".join(lines)
 
     # ---------------- 小工具 ----------------

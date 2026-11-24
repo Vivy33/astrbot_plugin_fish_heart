@@ -545,8 +545,101 @@ body::before {
 .thought-list { position: relative; z-index: 1; flex: 1 1 0; max-height: none; min-height: 80px; overflow-y: auto; align-content: start; list-style: none; margin: 0; padding: 0 4px 0 0; display: grid; gap: 10px; scrollbar-width: thin; }
 
 /* 「最近的变化」：念头卡的下半区 */
-.sub-head { margin-top: 12px; }
+.sub-head { margin-top: 12px; margin-bottom: 6px; }
 .sub-head h3 { margin: 0; font-size: 12px; font-weight: 620; color: var(--muted); letter-spacing: 0.04em; }
+.event-cols {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: 74px 1fr 56px;
+  gap: 8px;
+  padding: 0 12px 5px 0;
+  font-size: 10.5px;
+  color: var(--dim);
+  border-bottom: 1px solid var(--line);
+}
+.event-cols[hidden] { display: none; }
+
+/* ---------- 顶栏特别的日子小胶囊 ---------- */
+.special-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.special-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: rgba(255, 255, 255, 0.9);
+  background: rgba(15, 23, 42, 0.42);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  backdrop-filter: blur(8px);
+}
+.special-pill.today {
+  color: #fff7ed;
+  background: linear-gradient(135deg, rgba(244, 114, 182, 0.42), rgba(251, 146, 60, 0.36));
+  border-color: rgba(253, 186, 116, 0.55);
+  box-shadow: 0 0 14px rgba(244, 114, 182, 0.25);
+}
+[data-theme="light"] .special-pill {
+  color: #1e293b;
+  background: rgba(255, 255, 255, 0.72);
+  border-color: rgba(15, 23, 42, 0.12);
+}
+[data-theme="light"] .special-pill.today {
+  color: #9a3412;
+  background: linear-gradient(135deg, rgba(253, 224, 236, 0.92), rgba(255, 237, 213, 0.92));
+  border-color: rgba(251, 146, 60, 0.45);
+}
+.special-pill.vibe {
+  color: rgba(224, 242, 254, 0.94);
+  background: rgba(14, 116, 144, 0.32);
+  border-color: rgba(125, 211, 252, 0.34);
+}
+.special-pill.vibe.muted { opacity: 0.62; }
+[data-theme="light"] .special-pill.vibe {
+  color: #075985;
+  background: rgba(224, 242, 254, 0.85);
+  border-color: rgba(56, 189, 248, 0.38);
+}
+
+/* ---------- 念头卡片内的小约定 ---------- */
+.promise-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.promise-item {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 11px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  font-size: 13px;
+}
+.promise-text { color: var(--text); }
+.promise-age {
+  flex: none;
+  font-size: 11.5px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+[data-theme="light"] .promise-item {
+  background: rgba(15, 23, 42, 0.03);
+  border-color: rgba(15, 23, 42, 0.08);
+}
+.event-cols span:last-child { text-align: right; }
 .event-list {
   position: relative;
   z-index: 1;
@@ -555,8 +648,8 @@ body::before {
   overflow-y: auto;
   align-content: start;
   list-style: none;
-  margin: 8px 0 0;
-  padding: 0;
+  margin: 4px 0 0;
+  padding: 0 8px 14px 0;
   display: grid;
   gap: 2px;
   scrollbar-width: thin;
@@ -564,7 +657,7 @@ body::before {
 }
 .event-list li {
   display: grid;
-  grid-template-columns: 58px 1fr auto;
+  grid-template-columns: 74px 1fr 56px;
   gap: 8px;
   align-items: baseline;
   padding: 5px 0;
@@ -572,9 +665,29 @@ body::before {
   border-bottom: 1px dashed var(--line);
 }
 .event-list li:last-child { border-bottom: none; }
-.event-list .ev-name { color: var(--text); font-weight: 620; }
+.event-list .ev-name { color: var(--text); font-weight: 620; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .event-list .ev-delta { color: var(--muted); font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.event-list .ev-time { color: var(--dim); white-space: nowrap; }
+.event-list .ev-delta em { font-style: normal; }
+.event-list .ev-pos { color: var(--text); }
+.event-list .ev-neg { color: #f6ad55; }
+.event-list .ev-time { color: var(--dim); white-space: nowrap; text-align: right; }
+
+/* 统一暗/亮色细滚动条，避免 Windows 默认灰粗条贴文字 */
+.event-list::-webkit-scrollbar,
+.timeline::-webkit-scrollbar,
+.thought-list::-webkit-scrollbar,
+.inject-list::-webkit-scrollbar,
+.last-scroll::-webkit-scrollbar { width: 5px; }
+.event-list::-webkit-scrollbar-track,
+.timeline::-webkit-scrollbar-track,
+.thought-list::-webkit-scrollbar-track,
+.inject-list::-webkit-scrollbar-track,
+.last-scroll::-webkit-scrollbar-track { background: transparent; }
+.event-list::-webkit-scrollbar-thumb,
+.timeline::-webkit-scrollbar-thumb,
+.thought-list::-webkit-scrollbar-thumb,
+.inject-list::-webkit-scrollbar-thumb,
+.last-scroll::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 99px; }
 .thought {
   padding: 12px 14px;
   border-radius: 13px;
@@ -671,7 +784,7 @@ body::before {
   z-index: 1;
   list-style: none;
   margin: 0;
-  padding: 0 0 0 18px;
+  padding: 0 6px 14px 18px;
   display: grid;
   gap: 12px;
   flex: 1;
@@ -680,9 +793,6 @@ body::before {
   overflow-y: auto;
   scrollbar-width: thin;
   align-content: start;
-  min-height: 0;
-  overflow-y: auto;
-  scrollbar-width: thin;
   mask-image: linear-gradient(to bottom, #000 90%, transparent);
 }
 .timeline::before {
@@ -692,7 +802,7 @@ body::before {
   width: 1px;
   background: linear-gradient(var(--line-strong), transparent);
 }
-.timeline li { position: relative; display: grid; gap: 2px; }
+.timeline li { position: relative; display: grid; gap: 2px; min-width: 0; }
 .timeline li::before {
   content: "";
   position: absolute;
@@ -704,6 +814,19 @@ body::before {
 }
 .timeline li[data-who="bot"]::before { background: var(--mode); border-color: transparent; box-shadow: 0 0 8px var(--mode); }
 .timeline .who { font-size: 10.5px; color: var(--dim); letter-spacing: 0.03em; }
+.timeline .quote {
+  font-size: 11.5px;
+  color: var(--muted);
+  background: var(--panel);
+  border-left: 2px solid var(--line-strong);
+  border-radius: 0 6px 6px 0;
+  padding: 3px 8px;
+  margin: 2px 0 3px;
+  line-height: 1.45;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .timeline .what { font-size: 13px; word-break: break-word; }
 .timeline li[data-who="bot"] .what { color: color-mix(in srgb, var(--mode) 78%, var(--text)); }
 
