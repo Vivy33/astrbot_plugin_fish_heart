@@ -4208,11 +4208,11 @@ class EmotionCore(Star):
 
             # 她主动开口后，他这次回了
             if self.state.get("awaiting_reply"):
-                gap = time.time() - float(self.state.get("last_proactive", 0))
-                if gap <= 30 * 60:
-                    events.insert(0, "reply_fast")
                 # 群里应一句不算"他回我了"：等待态只由私聊解除
                 if not is_group:
+                    gap = time.time() - float(self.state.get("last_proactive", 0))
+                    if gap <= 30 * 60:
+                        events.insert(0, "reply_fast")
                     self.state["awaiting_reply"] = False
                     self.state["penalized_6h"] = False
                     self.state["penalized_24h"] = False
@@ -6787,7 +6787,6 @@ class EmotionCore(Star):
             return False
         self.state["last_woken_ts"] = now_ts
         self._apply_event("woken")
-        self._note_event("woken", EVENT_EFFECTS.get("woken", {}), 1.0)
         return True
 
     def _affect_log_enabled(self) -> bool:
