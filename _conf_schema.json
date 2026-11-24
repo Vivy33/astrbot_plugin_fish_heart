@@ -395,7 +395,7 @@
         "type": "string",
         "description": "成人模式写法文件",
         "default": "",
-        "hint": "留空用插件自带的 adult_mode_spec.md（蒸馏版，约 160 字）；也可以填绝对路径，或相对插件目录的路径。欲到 60 后，对话里的明确同意或发 /adult on，打开的那一轮会把这段写法约束注入一次：只挂在本轮用户消息末尾（mark_as_temp），不改 system prompt、不回存历史，人设和当前场景不受影响。",
+        "hint": "留空用插件自带的 adult_mode_spec.md（写法约束，约 620 字，只约束写法、不放行内容）；也可以填绝对路径，或相对插件目录的路径。欲到 60 后，对话里的明确同意或发 /adult on，打开的那一轮会把这段写法约束注入一次：只挂在本轮用户消息末尾（mark_as_temp），不改 system prompt、不回存历史，人设和当前场景不受影响。",
         "invisible": true
       },
       "scene_consent_minutes": {
@@ -430,7 +430,7 @@
         "type": "bool",
         "description": "亲密完成后进入贤者期",
         "default": true,
-        "hint": "打开后，成人场景持续够久、又出现事后收束词（结束了/我到了/完事了…）时，欲会大幅回落到成人层门槛以下，并进入一段不应期；关掉完全回到旧行为。",
+        "hint": "打开后，成人场景持续够久、又出现明确的收束表达时，欲会大幅回落到成人层门槛以下，并进入一段冷却期；关掉完全回到旧行为。",
         "invisible": true
       },
       "sage_drop_ratio": {

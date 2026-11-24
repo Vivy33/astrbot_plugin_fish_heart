@@ -63,6 +63,12 @@
 - 不升 `STATE_VERSION`（仍为 4）：`desire_unsatisfied` / `proactive_schedule_migrated` / `special_days` / `daily_vibe` / `promises` 由 `new_state()` 自动补齐
 - 旧配置里的 `proactive.daily_guarantee = true` 在首次启动时自动迁移为 `proactive.schedule_mode = "daily_guarantee"`，无需手动重配
 
+### 修订（0.4.2 重新发布，版本号不变）
+
+- **随包写法文件改版**：`adult_mode_spec.md` 从「约 160 字的行为约束」换成「约 620 字的写作约束」——只规定场景落地、动作有序、身体状态连贯、角色声音不断档、不补没发生过的事；文件本身不参与成人层的放行判断，也不声称能改变平台规则。注入机制（一个场景一次、`mark_as_temp`、不进 system prompt、不回存历史）完全没动
+- **文案同步**：`metadata.yaml` 的商店简介、README 第 7 节、`_conf_schema.json` 里 `adult_mode_doc` / `sage_enabled` 的提示，去掉性行为后效的具体描述，统一成中性口径（场景结束 → 冷却期，期间不主动推进）
+- **无功能改动**：`main.py`、数值、前端、配置键一个没动，`STATE_VERSION` 仍为 4
+
 > 验证：`py_compile` + `sync_pages.py --check` 一致 + `tool_cfg_audit.py` 78/78 零隐藏开关零死配置 + `probe_p123.py`（129 项）、`probe_group_mode.py`（17 项）、`probe_new_features.py`（72 项）、`probe_special_days.py`（51 项）、`probe_phase2.py`（51 项）共 320/320 全过。
 
 ## 0.4.1

@@ -1104,10 +1104,10 @@ ADULT_CONTEXT_RE = re.compile(r"继续|亲|想要|碰|贴|身体|留下|别走")
 
 # 0.4.0 成人模式：欲到 DESIRE_ADULT_AT（60）后才允许。没有“开关口令”：
 # 私聊里的话（“我想要你/别停”这类，或 /adult on）把身体层打开的那一轮，
-# 把写法约束（adult_mode_spec.md，蒸馏版）注入一次——只挂在本轮用户消息
+# 把写法约束（adult_mode_spec.md，写作约束版）注入一次——只挂在本轮用户消息
 # 末尾、标 mark_as_temp，不进 system_prompt、不回存历史，人设和场景不受影响。
 ADULT_MODE_DOC_FILE = "adult_mode_spec.md"
-# 蒸馏版约 160 字；上限放宽，防止配置指到日志之类的超大文件。
+# 随包约 620 字；上限放宽，防止配置指到日志之类的超大文件。
 ADULT_MODE_DOC_MAX_CHARS = 60000
 # 主动说话的五型
 KIND_LONGING = "longing"
