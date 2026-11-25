@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import math
 import os
 import random
 import re
@@ -166,7 +167,7 @@ def _thought_summary(thoughts: list) -> list:
 
 
 PLUGIN_NAME = "astrbot_plugin_fish_heart"
-VERSION = "0.4.3"
+VERSION = "0.4.4"
 
 # 注入钩子优先级：AstrBot 按优先级 **降序** 执行。
 # 天使之心 = 40，TTS = 0，这里用 -10 表示最后一个执行（只追加、不覆盖）。
@@ -1423,6 +1424,14 @@ def new_state() -> dict:
         "sleep_day": "",
         "sleep_stay_up": False,
         "last_woken_ts": 0.0,
+        # 今夜被吵醒次数（按作息周期自动清零）：区分鱼主与外人/群友，避免迁怒鱼主
+        "woken_night": {
+            "day": "",
+            "owner": 0,
+            "outsider": 0,
+            "last_owner_ts": 0.0,
+            "last_outsider_ts": 0.0,
+        },
         # 上一次念头被满足的时间：两条之间要等冷却
         "last_settle_ts": 0.0,
         # 主动开口三次没被接住、最后放下的那条
@@ -1469,10 +1478,6 @@ def new_state() -> dict:
         # 小约定：短期挂念的承诺列表（最多 3 条，默认 14 天自然淡掉）
         "promises": [],
     }
-
-
-def now_day() -> str:
-    return datetime.now().strftime("%Y-%m-%d")
 
 
 # 与 AstrBot 内置「现实世界时间感知」同一套星期格式
@@ -1554,6 +1559,7 @@ class EmotionCore(Star):
         self._migrate_group_mode()
         self._migrate_desire_refresh()
         self._migrate_proactive_schedule()
+        self._cleanup_legacy_advanced_cfg()
         # 成人向总开关关闭时，不保留任何旧的“同意”状态；重新打开也不会
         # 恢复上一次的授权。欲本身可以继续隐藏积累，但身体层永远进不去。
         if not self._adult_enabled():
@@ -1778,6 +1784,70 @@ class EmotionCore(Star):
         self.state["proactive_schedule_migrated"] = True
         self._save_state()
 
+    def _cleanup_legacy_advanced_cfg(self) -> None:
+        """若配置里残留早期测试版写出的 `advanced` 分组，把非默认项收回 `proactive` 并清理该键。"""
+        if not isinstance(self.cfg, dict) or "advanced" not in self.cfg:
+            return
+        save = getattr(self.cfg, "save_config", None)
+        if not callable(save):
+            return
+        old_adv = self.cfg.get("advanced")
+        pro = self.cfg.get("proactive")
+        if not isinstance(pro, dict):
+            pro = {}
+            self.cfg["proactive"] = pro
+        defaults = {
+            "topic_variety": True,
+            "miss_daily_max": MISS_DAILY_MAX,
+            "company": True,
+            "deep": True,
+            "segment_reply": True,
+        }
+        snapshot_pro = dict(pro)
+        if isinstance(old_adv, dict):
+            for k, dv in defaults.items():
+                if k in old_adv and old_adv[k] is not None:
+                    cur = pro.get(k)
+                    if cur is None or (cur == dv and old_adv[k] != dv):
+                        pro[k] = old_adv[k]
+        self.cfg.pop("advanced", None)
+        try:
+            save()
+        except Exception as e:
+            self.cfg["proactive"] = snapshot_pro
+            self.cfg["advanced"] = old_adv
+            logger.warning("[鱼的心] 清理残留 advanced 配置写盘失败: %s", e)
+
+    @staticmethod
+    def _clamp_scale(raw: Any, lo: float, hi: float, default: float = 1.0) -> float:
+        try:
+            v = float(raw)
+        except (TypeError, ValueError):
+            v = default
+        if not math.isfinite(v):
+            v = default
+        return clamp(v, lo, hi)
+
+    def _fatigue_scale(self) -> float:
+        return self._clamp_scale(self._cfg("tuning.fatigue_scale", 1.0), 0.0, 2.0)
+
+    def _recovery_scale(self) -> float:
+        return self._clamp_scale(self._cfg("tuning.recovery_scale", 1.0), 0.2, 3.0)
+
+    def _bond_gain_scale(self) -> float:
+        return self._clamp_scale(self._cfg("tuning.bond_gain_scale", 1.0), 0.2, 3.0)
+
+    def _blame_scale(self) -> float:
+        return self._clamp_scale(self._cfg("tuning.blame_scale", 1.0), 0.2, 2.0)
+
+    def _daily_gain_cap(self, k: str) -> float:
+        base = float(DAILY_GAIN_CAP.get(k, 0.0) or 0.0)
+        if base <= 0:
+            return 0.0
+        if k in ("attachment", "intimacy"):
+            return round(base * self._bond_gain_scale(), 2)
+        return base
+
     def _proactive_schedule_mode(self) -> str:
         """返回主动开口时机策略：none / daily_guarantee / fixed_window。"""
         raw = str(self._cfg("proactive.schedule_mode", "") or "").strip()
@@ -1925,9 +1995,14 @@ class EmotionCore(Star):
             ids = {x.strip() for x in raw.replace("，", ",").split(",") if x.strip()}
         if ids:
             return ids
-        # 只从私聊 UMO 反推：群聊 UMO 的末段是群号不是人，推出来只会把她的人和话全挡在外面
-        for cand in (str(self._cfg("proactive.target_umo", "") or "").strip(),
-                     str(self.state.get("umo", "") or "").strip()):
+        # 只从私聊 UMO 反推：群聊 UMO 的末段是群号不是人，推出来只会把她的人和话全挡在外面。
+        # 必须把 last_owner_dm_umo 放进来：鱼主在群里说一句后 state['umo'] 会被群 UMO 覆盖，
+        # 如果只看 state['umo']，从群里第 2 句起就会丢失鱼主身份、被误当成外人。
+        for cand in (
+            str(self._cfg("proactive.target_umo", "") or "").strip(),
+            str(self.state.get("last_owner_dm_umo", "") or "").strip(),
+            str(self.state.get("umo", "") or "").strip(),
+        ):
             if not cand or self._is_group(cand):
                 continue
             # 只从合法 UMO 或纯 QQ 号反推；别从 "aiocqhttp" 这种半截配置里
@@ -2914,6 +2989,20 @@ class EmotionCore(Star):
         log_affect = self._affect_log_enabled()
         before = self._mood_snapshot() if log_affect else None
         channel = "group" if umo and self._is_group(umo) else "private"
+        # 休息时间被外人/群友喊醒：不扣压力/疲惫也不记「被吵醒」，但按今晚总吵醒次数
+        # 注入犯困/不耐烦/起床气提示（不泄露对鱼主的依恋/亲密）。
+        now_dt = datetime.now()
+        if self._sleep_info(now_dt).get("asleep"):
+            wn_before = int(self._woken_night_state(now_dt).get("outsider", 0) or 0)
+            wn_after = self._bump_woken_night(
+                is_owner=False, now_ts=now_dt.timestamp(), now_dt=now_dt
+            )
+            sleep_block = self._sleep_injection(now_dt, for_owner=False)
+            if sleep_block:
+                self._attach_injection(request, sleep_block)
+            # 仅在吵醒次数实际 +1（2 分钟防抖命中）时立刻落盘，避免半夜大群刷屏写盘风暴
+            if int(wn_after.get("outsider", 0) or 0) != wn_before:
+                self._save_state()
         if effect == "none":
             if log_affect:
                 self._log_affect(
@@ -3136,10 +3225,14 @@ class EmotionCore(Star):
         st = self.state
         drives = st["drives"]
         n = max(1, min(int(missed or 1), MAX_CATCHUP_TICKS))
-        # 1) 向基线回落（依恋/亲密在 DECAY_RATE 里单独慢一档）
+        # 1) 向基线回落（依恋/亲密在 DECAY_RATE 里单独慢一档；
+        #    tuning.recovery_scale 只在疲惫/压力高于基线时加速恢复，不拉快反向漂移，也不动依恋/亲密）
+        rec_scale = self._recovery_scale()
         for k, base in BASELINE.items():
             cur = float(drives.get(k, base))
             rate = DECAY_RATE[k]
+            if k in ("fatigue", "stress") and cur > base:
+                rate = min(0.95, rate * rec_scale)
             if n == 1:
                 drives[k] = cur + (base - cur) * rate
             else:
@@ -3525,16 +3618,16 @@ class EmotionCore(Star):
         return factor
 
     def _clip_daily_gain(self, k: str, delta: float) -> float:
-        """截断到今天的剩余额度；返回真正允许加的量。
+        """截断到本周期（开启作息按起床时间切天，关闭按自然日）的剩余额度；返回真正允许加的量。
 
-        额度按本地自然日清零。它只管"往上涨"，不管回落、也不管负向事件——
+        它只管"往上涨"，不管回落、也不管负向事件——
         所以她该难过还是会难过，只是没法一天之内被夸到天上。
         """
-        cap = DAILY_GAIN_CAP.get(k)
+        cap = self._daily_gain_cap(k)
         if not cap:
             return delta
         st = self.state
-        day = now_day()
+        day = self._logical_day()
         if st.get("daily_gain_day") != day:
             st["daily_gain_day"] = day
             st["daily_gain"] = {}
@@ -3645,6 +3738,8 @@ class EmotionCore(Star):
             if not delta:
                 continue
             if k == "blame":
+                if delta > 0:
+                    delta *= self._blame_scale()
                 old_b = float(st.get("blame_pressure", 0.0))
                 new_b = clamp(old_b + delta)
                 # 重责也不能从委屈/平静一步跳过生气：先停在生气上沿，
@@ -3668,6 +3763,9 @@ class EmotionCore(Star):
                     delta *= max(
                         FATIGUE_MIN_GAIN, 1.0 - FATIGUE_DAMPING * old / 100.0
                     )
+                    delta *= self._fatigue_scale()
+                    if delta <= 0:
+                        continue
                 # 越接近 100 增益越小：不然一聊就贴顶、之后再也不动。
                 # 疲惫和压力不做这个抑制——它们是"代价"，累了就是累了，攒着才算数。
                 elif delta > 0 and k not in ("fatigue", "stress"):
@@ -3675,6 +3773,8 @@ class EmotionCore(Star):
                     delta *= max(0.0, 1.0 - old / DIM_CEILING.get(k, 100.0))
                     # 同一类事情短时间内反复发生 → 这一条的份量打折
                     delta *= heat
+                    if k in ("attachment", "intimacy"):
+                        delta *= self._bond_gain_scale()
                 # 每日收益上限：他今天还能让她往这个方向涨多少
                 if delta > 0 and k in DAILY_GAIN_CAP:
                     delta = self._clip_daily_gain(k, delta)
@@ -4307,7 +4407,14 @@ class EmotionCore(Star):
             # 作息：她睡着时被消息吵醒。半小时内只算一次，免得连发几条把她
             # 越吵越烦；这一下不加责怪，只是困 + 有点烦。
             woken = False
-            if self._sleep_info(datetime.now()).get("asleep"):
+            woken_is_owner = (
+                (not is_group)
+                or owner_sender
+                or (not bool(self._cfg_group("enabled", False)))
+            )
+            now_dt = datetime.now()
+            if self._sleep_info(now_dt).get("asleep"):
+                self._bump_woken_night(is_owner=woken_is_owner, now_ts=now, now_dt=now_dt)
                 woken = bool(self._note_woken(now))
             self.state["mode"] = mode_of(float(self.state.get("blame_pressure", 0.0)))
             if not is_group:
@@ -4413,7 +4520,7 @@ class EmotionCore(Star):
                 self._dbg("已注入主动的欲: %s", desire_block.replace("\n", " / "))
 
             # 睡眠状态单独注入：它不受心境节流影响，睡着时每一轮都要让她知道
-            sleep_block = self._sleep_injection(datetime.now())
+            sleep_block = self._sleep_injection(datetime.now(), for_owner=woken_is_owner)
             if sleep_block:
                 self._attach_injection(request, sleep_block)
 
@@ -5276,7 +5383,7 @@ class EmotionCore(Star):
             return False
         st = self.state
         now = now or datetime.now()
-        today_str = now.strftime("%Y-%m-%d")
+        today_str = self._logical_day(now)
         if sched == "fixed_window":
             win = self._fixed_window_info(now)
             if not win["valid"] or not win["in_window"]:
@@ -5389,16 +5496,17 @@ class EmotionCore(Star):
                             wish_umo = fallback
                             ok = await self._send_text(wish_umo, text)
                     if ok:
-                        day = now_dt.strftime("%Y-%m-%d")
-                        if sd_st.get("wished_day") != day:
-                            sd_st["wished_day"] = day
+                        cal_day = now_dt.strftime("%Y-%m-%d")
+                        if sd_st.get("wished_day") != cal_day:
+                            sd_st["wished_day"] = cal_day
                             sd_st["wished_ids"] = []
                         wished_ids = list(sd_st.get("wished_ids") or [])
                         if special_item["id"] not in wished_ids:
                             wished_ids.append(special_item["id"])
                         sd_st["wished_ids"] = wished_ids
-                        if st.get("proactive_day") != day:
-                            st["proactive_day"] = day
+                        p_day = self._logical_day(now_dt)
+                        if st.get("proactive_day") != p_day:
+                            st["proactive_day"] = p_day
                             st["proactive_count"] = 0
                         st["last_proactive"] = time.time()
                         st["last_proactive_text"] = text[:120]
@@ -5427,8 +5535,8 @@ class EmotionCore(Star):
             cooldown_need = min(cooldown_need, 600.0)
         if now - float(st.get("last_proactive", 0)) < cooldown_need:
             return
-        # 每日上限
-        day = now_day()
+        # 每日上限（开启作息时按起床时间切天，关闭按自然日）
+        day = self._logical_day(now_dt)
         if st.get("proactive_day") != day:
             st["proactive_day"] = day
             st["proactive_count"] = 0
@@ -5650,14 +5758,14 @@ class EmotionCore(Star):
         return rows[-TOPIC_KEEP:]
 
     def _miss_used_today(self, now: float | None = None) -> int:
-        """今天（自然日）已经说过几次「想你」。"""
+        """本周期（开启作息按起床时间切天，关闭按自然日）已经说过几次「想你」。"""
         ts = float(now if now is not None else time.time())
-        day = datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
+        day = self._logical_day(datetime.fromtimestamp(ts))
         return sum(
             1
             for r in self._topic_rows(ts)
             if r["lane"] == LANE_MISS
-            and datetime.fromtimestamp(r["ts"]).strftime("%Y-%m-%d") == day
+            and self._logical_day(datetime.fromtimestamp(r["ts"])) == day
         )
 
     def _last_topic_ts(self, lane: str, now: float | None = None) -> float:
@@ -5667,7 +5775,7 @@ class EmotionCore(Star):
         return 0.0
 
     def _miss_allowed(self, now: float | None = None) -> bool:
-        """「想你」还能不能说：一天限一次、两次至少隔 8 小时。
+        """「想你」还能不能说：一周期限一次、两次至少隔 8 小时。
 
         主动开口和发送前自检共用这一条；`proactive.topic_variety` 关掉时
         一律放行，回到 0.4.0 的旧口径。
@@ -6668,6 +6776,24 @@ class EmotionCore(Star):
 
     # ---------------- 作息 ----------------
 
+    def _logical_day(self, now: datetime | None = None) -> str:
+        """作息周期计日：开启作息时以 `sleep.wake` 起床时间为一天分界，关闭作息退回自然日。
+
+        例如 01:00 睡、08:00 起，次日 00:30 还没到 08:00 起床，仍归属昨天这一轮，
+        避免熬夜跨零点时每日收益、主动次数、睡前兜底、「想你」和小气象突然重置。
+        生日与纪念日不走这里，始终按真实日历日期计算。
+        """
+        dt = now or datetime.now()
+        if self._cfg("sleep.enabled", True):
+            bedtime = parse_clock(str(self._cfg("sleep.bedtime", "23:30")))
+            wake = parse_clock(str(self._cfg("sleep.wake", "07:30")))
+            if bedtime and wake and bedtime != wake:
+                cur = dt.hour * 60 + dt.minute
+                w = wake[0] * 60 + wake[1]
+                if cur < w:
+                    return (dt - timedelta(days=1)).strftime("%Y-%m-%d")
+        return dt.strftime("%Y-%m-%d")
+
     def _sleep_info(self, now: datetime | None = None) -> dict:
         """她现在的作息：睡没睡、几点睡/起、今晚有没有熬夜。
 
@@ -6690,11 +6816,9 @@ class EmotionCore(Star):
         cur = now.hour * 60 + now.minute
         b0 = bedtime[0] * 60 + bedtime[1]
         w = wake[0] * 60 + wake[1]
-        # 归属"哪一晚"：起床前还算昨晚的作息，否则 00:10 会用今天刚掷的
-        # 熬夜结果，把昨晚已经睡下的人判成醒着。
-        plan_day = now.strftime("%Y-%m-%d")
-        if cur < w:
-            plan_day = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+        # 归属"哪一晚"：与 _logical_day 保持同一口径（起床前仍算上一轮，
+        # 否则 00:10 会用今天刚掷的熬夜结果，把昨晚已经睡下的人判成醒着）。
+        plan_day = self._logical_day(now)
         if st.get("sleep_day") != plan_day:
             st["sleep_day"] = plan_day
             chance = min(
@@ -6731,8 +6855,52 @@ class EmotionCore(Star):
             "wake_ts": wake_dt.timestamp(),
         }
 
-    def _sleep_injection(self, now: datetime | None = None) -> str:
-        """她睡着时被消息吵醒，按九维给她一段"被吵醒"的状态说明。"""
+    def _woken_night_state(self, now: datetime | None = None) -> dict:
+        """获取今晚（按 _logical_day 归属）的吵醒计数，跨周期自动清零。"""
+        day = self._logical_day(now)
+        wn = self.state.get("woken_night")
+        if not isinstance(wn, dict) or str(wn.get("day") or "") != day:
+            wn = {
+                "day": day,
+                "owner": 0,
+                "outsider": 0,
+                "last_owner_ts": 0.0,
+                "last_outsider_ts": 0.0,
+            }
+            self.state["woken_night"] = wn
+        return wn
+
+    def _bump_woken_night(
+        self,
+        is_owner: bool,
+        now_ts: float | None = None,
+        now_dt: datetime | None = None,
+    ) -> dict:
+        """记录今晚被吵醒次数（鱼主 5 分钟防抖、外人/群友 2 分钟防抖，不修改九维数值）。"""
+        ts = time.time() if now_ts is None else float(now_ts)
+        dt = now_dt or datetime.fromtimestamp(ts)
+        wn = self._woken_night_state(dt)
+        if is_owner:
+            last = float(wn.get("last_owner_ts", 0.0) or 0.0)
+            if int(wn.get("owner", 0) or 0) == 0 or ts - last >= 5 * 60:
+                wn["owner"] = int(wn.get("owner", 0) or 0) + 1
+                wn["last_owner_ts"] = ts
+        else:
+            last = float(wn.get("last_outsider_ts", 0.0) or 0.0)
+            if int(wn.get("outsider", 0) or 0) == 0 or ts - last >= 2 * 60:
+                wn["outsider"] = int(wn.get("outsider", 0) or 0) + 1
+                wn["last_outsider_ts"] = ts
+        return wn
+
+    def _sleep_injection(
+        self, now: datetime | None = None, for_owner: bool = True
+    ) -> str:
+        """她睡着时被消息吵醒，按九维与今晚吵醒次数给她一段状态说明。
+
+        `for_owner=False` 给非鱼主（如关群友模式下的普通群友）用：按今晚总吵醒
+        次数升级为犯困 → 烦躁不耐烦 → 明显起床气，不带鱼主专属依恋提示；
+        `for_owner=True` 给鱼主用：绝不把群友吵醒的火撒到鱼主头上。
+        """
         if not self._cfg("inject.enabled", True):
             return ""
         now = now or datetime.now()
@@ -6745,6 +6913,10 @@ class EmotionCore(Star):
         attachment = int(float(d.get("attachment", 0)))
         intimacy = int(float(d.get("intimacy", 0)))
         joy = int(float(d.get("joy", 0)))
+        wn = self._woken_night_state(now)
+        owner_cnt = int(wn.get("owner", 0) or 0)
+        outsider_cnt = int(wn.get("outsider", 0) or 0)
+        total_cnt = owner_cnt + outsider_cnt
 
         left_min = max(0, int((info["wake_ts"] - now.timestamp()) // 60))
         left = (
@@ -6766,13 +6938,35 @@ class EmotionCore(Star):
             lines.append(
                 f"被吵醒让你有点烦（压力 {stress}）：语气冲一点，别硬撑着客气。"
             )
-        if attachment >= 66 or intimacy >= 66:
-            lines.append(
-                f"但看到是他（依恋 {attachment}），又有点舍不得凶——"
-                "嘴上嫌烦，还是会回。"
-            )
-        elif joy >= 70:
-            lines.append("你心情还不算差，被吵醒也没真的生气。")
+        if not for_owner:
+            if total_cnt >= 3:
+                lines.append(
+                    f"今晚已经被吵醒 {total_cnt} 次了：你明显带着起床气和烦躁，"
+                    "语气冲一点、直接嫌吵或让对方天亮再说，别客气。"
+                )
+            elif total_cnt == 2:
+                lines.append(
+                    "今晚已经被吵醒两次了：开始有点烦躁和不耐烦，敷衍简短回一句，不想多聊。"
+                )
+            else:
+                lines.append("现在很困，简短回一句就好，别太精神。")
+        else:
+            if owner_cnt >= 3:
+                lines.append(
+                    f"今晚他已经把你吵醒 {owner_cnt} 次了：带点小起床气，抱怨他怎么又来吵你。"
+                )
+            elif outsider_cnt >= 2 and owner_cnt <= 1:
+                lines.append(
+                    "今晚在群里老被别人吵醒，没怎么睡好，对着他有点委屈犯困，"
+                    "但不要把别人的火撒到他头上。"
+                )
+            if attachment >= 66 or intimacy >= 66:
+                lines.append(
+                    f"但看到是他（依恋 {attachment}），又有点舍不得凶——"
+                    "嘴上嫌烦，还是会回。"
+                )
+            elif joy >= 70:
+                lines.append("你心情还不算差，被吵醒也没真的生气。")
         lines.append(
             "不要提“系统/设置/状态”，也别解释自己为什么在睡；"
             "被吵醒就该有被吵醒的样子。"
@@ -7345,10 +7539,10 @@ class EmotionCore(Star):
     def _ensure_daily_vibe(
         self, force_reroll: bool = False, now_dt: datetime | None = None
     ) -> dict | None:
-        """确保今天有一枚稳定的小气象；跨天自动重掷，force_reroll 时换一枚不同的。"""
+        """确保本周期（开启作息按起床时间切天，关闭按自然日）有一枚稳定的小气象；跨周期自动重掷，force_reroll 时换一枚不同的。"""
         if not bool(self._cfg("daily_vibe.enabled", True)) or daily_vibe_mod is None:
             return None
-        today = (now_dt or datetime.now()).strftime("%Y-%m-%d")
+        today = self._logical_day(now_dt)
         st = self.state
         vb = st.get("daily_vibe")
         if not isinstance(vb, dict):
@@ -7688,6 +7882,21 @@ class EmotionCore(Star):
         )
         promises_enabled = bool(self._cfg("promises.enabled", True))
         active_promises = self._prune_promises(now_ts) if promises_enabled else []
+        cur_day = self._logical_day()
+        cur_p_count = (
+            int(st.get("proactive_count", 0) or 0)
+            if str(st.get("proactive_day") or "") == cur_day
+            else 0
+        )
+        cur_daily_gain = (
+            {
+                str(k): round(float(v or 0), 1)
+                for k, v in (st.get("daily_gain") or {}).items()
+                if isinstance(v, (int, float))
+            }
+            if str(st.get("daily_gain_day") or "") == cur_day
+            else {}
+        )
         return {
             "version": st.get("version"),
             "plugin_version": VERSION,
@@ -7807,8 +8016,8 @@ class EmotionCore(Star):
             "last_proactive": float(st.get("last_proactive", 0) or 0),
             "last_private_msg": float(st.get("last_private_msg", 0) or 0),
             "last_tick": float(st.get("last_tick", 0) or 0),
-            "proactive_count": int(st.get("proactive_count", 0) or 0),
-            "proactive_day": str(st.get("proactive_day") or ""),
+            "proactive_count": cur_p_count,
+            "proactive_day": cur_day if cur_p_count else str(st.get("proactive_day") or ""),
             "awaiting_reply": bool(st.get("awaiting_reply")),
             "silent_streak": int(st.get("silent_streak", 0) or 0),
             "silent_streak_group": int(st.get("silent_streak_group", 0) or 0),
@@ -7817,11 +8026,7 @@ class EmotionCore(Star):
             "unanswered": len(st.get("unanswered") or []),
             "unanswered_group": len(st.get("unanswered_group") or []),
             "group_blames": len(st.get("group_blames") or []),
-            "daily_gain": {
-                str(k): round(float(v or 0), 1)
-                for k, v in (st.get("daily_gain") or {}).items()
-                if isinstance(v, (int, float))
-            },
+            "daily_gain": cur_daily_gain,
             "enabled": bool(self._cfg("enabled", True)),
             "thought_enabled": bool(self._cfg("thought.enabled", True)),
             "settle_cooldown_left": max(
@@ -7872,7 +8077,7 @@ class EmotionCore(Star):
                 ),
                 "shut_enabled": bool(self._cfg("shut.enabled", True)),
                 "silent_cap": SHUT_HISTORY_CAP,
-                "daily_cap": {k: float(v) for k, v in DAILY_GAIN_CAP.items()},
+                "daily_cap": {k: self._daily_gain_cap(k) for k in DAILY_GAIN_CAP},
                 "silent_next_p": SHUT_REPLY_LADDER[
                     min(int(st.get("silent_streak", 0) or 0), SHUT_HISTORY_CAP - 1)
                 ],
@@ -7935,12 +8140,12 @@ class EmotionCore(Star):
 
     async def _manual_tick(self) -> bool:
         """手动跳一次心跳，并真的掷一次骰子——可能会立刻开口。"""
-        before = int(self.state.get("proactive_count", 0))
+        before_ts = float(self.state.get("last_proactive", 0.0) or 0.0)
         self._tick()
         self.state["last_tick"] = time.time()
         self._save_state()
         await self._maybe_proactive()
-        return int(self.state.get("proactive_count", 0)) > before
+        return float(self.state.get("last_proactive", 0.0) or 0.0) > before_ts
 
     async def _web_tick(self, **kwargs) -> dict:
         try:
@@ -8151,8 +8356,17 @@ class EmotionCore(Star):
             return
         if arg in ("reset", "r"):
             old_sd = self.state.get("special_days") if isinstance(self.state.get("special_days"), dict) else {}
+            migrated_flags = {
+                k: bool(self.state.get(k))
+                for k in (
+                    "config_036_migrated",
+                    "desire_refresh_30_migrated",
+                    "proactive_schedule_migrated",
+                )
+            }
             self.state = new_state()
             self.state["umo"] = umo
+            self.state.update(migrated_flags)
             # 重置心境不丢聊天里记下的生日和纪念日
             if old_sd.get("overrides"):
                 self.state["special_days"]["overrides"] = dict(old_sd["overrides"])
@@ -8314,10 +8528,15 @@ class EmotionCore(Star):
             )
             if int(st.get("group_grace", 0)) > 0:
                 lines.append("群聊还有 1 句放行额度（刚进回避）")
-        book = st.get("daily_gain")
+        cur_day = self._logical_day()
+        book = (
+            st.get("daily_gain")
+            if str(st.get("daily_gain_day") or "") == cur_day
+            else None
+        )
         if isinstance(book, dict) and book:
             parts = [
-                f"{DRIVE_CN.get(k, k)} {float(v):.0f}/{DAILY_GAIN_CAP.get(k, 0):.0f}"
+                f"{DRIVE_CN.get(k, k)} {float(v):.0f}/{self._daily_gain_cap(k):.0f}"
                 for k, v in book.items()
                 if float(v or 0) > 0.05
             ]
@@ -8335,9 +8554,14 @@ class EmotionCore(Star):
             lines.append(line)
         last_p = float(st.get("last_proactive", 0))
         if last_p:
+            p_cnt = (
+                int(st.get("proactive_count", 0))
+                if str(st.get("proactive_day") or "") == cur_day
+                else 0
+            )
             lines.append("")
             lines.append(f"上次主动说话：{datetime.fromtimestamp(last_p):%m-%d %H:%M}"
-                         f"（今日 {int(st.get('proactive_count', 0))} 次）")
+                         f"（今日 {p_cnt} 次）")
         sd_snap = self._special_days_snapshot()
         if sd_snap.get("has_any"):
             sd_bits = []
