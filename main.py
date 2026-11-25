@@ -167,7 +167,7 @@ def _thought_summary(thoughts: list) -> list:
 
 
 PLUGIN_NAME = "astrbot_plugin_fish_heart"
-VERSION = "0.4.4"
+VERSION = "0.4.5"
 
 # 注入钩子优先级：AstrBot 按优先级 **降序** 执行。
 # 天使之心 = 40，TTS = 0，这里用 -10 表示最后一个执行（只追加、不覆盖）。
@@ -330,7 +330,9 @@ SAGE_DROP_RATIO = 0.6            # 完成时掉多少比例（保留 40%）
 SAGE_FLOOR = 20.0                # 掉完的下限，防止掉到 0 后恢复太慢
 SAGE_HOURS = 2.0                 # 不应期时长；0 = 只掉欲、不设不应期
 SAGE_GAIN_SCALE = 0.0            # 不应期内正向涨欲系数（0 = 完全撩不动）
-SAGE_MIN_SCENE_MIN = 15.0        # 场景至少持续多久才算「完成」
+SAGE_MIN_SCENE_MIN = 5.0         # 软收尾算「完成」前场景最少持续多久（分钟）
+SAGE_FINISH_MIN_SCENE_MIN = 2.0  # 明确完成词的最短场景时长上限（分钟）
+SAGE_SOFT_MAX_SCENE_HOURS = 3.0  # 软收尾算「完成」的最大场景跨度（小时），防隔半天说晚安误触
 
 # 场景同意：自然语言只在明确语境里生效；命令是长期预授权。
 ADULT_CONSENT_WINDOW_MIN = 10.0
@@ -426,7 +428,7 @@ EVENT_CN = {
     "goodnight": "晚安", "reply_fast": "及时回", "silent_6h": "沉默 6h",
     "silent_24h": "沉默 24h", "blame_mild": "责怪", "blame_mid": "责怪",
     "blame_hard": "重责", "fake_comfort": "敷衍", "dismissive": "不耐烦",
-    "woken": "被吵醒",
+    "woken": "被吵醒", "catch_up_nap": "补睡",
 }
 
 # 责怪压力 → 状态档位
@@ -1055,23 +1057,30 @@ ADULT_STOP_RE = re.compile(
 ADULT_ASK_RE = re.compile(
     r"想不想继续|想继续吗|可以继续吗|要继续吗|愿意吗|想要吗|可以吗|想吗"
 )
-# 成人场景里明确表达“想要她/想亲她/想抱她”的话，额外推高欲。
+# 成人场景里明确表达“想要她/想亲她/想抱她”的话，额外推高欲并标记本轮已进入亲密互动。
 # 普通“抱抱”仍走 comfort 的释放逻辑，不算这里。
 ADULT_DESIRE_RE = re.compile(
-    r"想要你|我想要你|我要你|想亲你|想吻你|想抱你|想靠近你"
+    r"想要你|我想要你|我要你|想亲你|想吻你|想抱你|想靠近你|"
+    r"抱紧你|亲吻你|吻你|贴紧你|揉你|别停|继续不要停"
 )
 # 自然收尾：不算喊停，不当成负面；只在当前场景已经建立时生效。
+# 若本轮有过明确亲密互动且持续足够久，也会自然触发贤者期。
 ADULT_SOFT_EXIT = (
     "先这样", "今天就到这里", "今天到这里", "抱一会儿就好", "抱抱就好",
+    "抱一会儿", "抱着睡", "抱抱睡",
     "睡觉吧", "先睡吧", "睡了", "晚安", "休息吧", "够了", "不继续了",
-    "停在这里", "我困了", "困了",
+    "停在这里", "我困了", "困了", "歇会儿", "歇一会", "缓一会儿", "缓一会",
 )
-# 「亲密完成」的事后收束词：和「软收尾」分开——软收尾只是关场景，
-# 完成才触发贤者模式（大幅掉欲 + 不应期）。
-# 优先级：喊停 > 完成 > 软收尾；问句（"结束了吗/到了吗"）不算完成。
+# 明确身体不适表达：任何情况下都优先按喊停暂停，不按亲密完成结算。
+ADULT_DISCOMFORT_WORDS = ("我不舒服", "有点难受", "我还没准备好")
+# 「亲密完成」的事后收束词：和「软收尾」分开——明确完成词可更快触发贤者模式
+# （大幅掉欲 + 不应期），且与“不要了/停一下”同句出现时优先按完成结算。
 ADULT_FINISH_WORDS = (
     "结束了", "结束吧", "我结束了", "我好了", "我到了",
     "完事了", "完事", "收工了", "满意了", "满足了",
+    "射了", "我出来了", "都出来了", "交公粮了", "交货了",
+    "贤者了", "贤者模式", "贤者时间",
+    "帮我擦一下", "去擦一下", "擦干净", "清理一下", "去洗个澡", "去冲个澡", "洗洗睡",
 )
 # 「我到了」后紧跟地点/宾语（我到了公司/我到了家/我到了门口）是到达，不是亲密完成；
 # 只有独立收尾（句末、标点、语气词）才算完成。
@@ -1083,6 +1092,12 @@ _FINISH_ARRIVE_RE = re.compile(
 _FINISH_TAIL_Q_RE = re.compile(r"^(?:了)?(?:[吗么呢?？]|没(?:有)?|吧)")
 # 完成词前紧贴否定词（“还没完事”“我不满意了”“别结束吧”）不算完成。
 _FINISH_HEAD_NEG_RE = re.compile(r"(?:没|不|别|未|不想|不要|还没|还不)$")
+# 完成词前紧贴日常事务主语（“工作结束了”“开会完事了”“饭吃好了”），排除日常误触。
+_FINISH_NON_INTIMATE_HEAD_RE = re.compile(
+    r"(?:工作|加班|开会|会议|上班|下班|上课|下课|考试|电影|剧|游戏|直播|活动|任务|代码|项目|作业|饭|菜|吃|喝|澡|洗|修|改|写|算|打|跑|忙)[^，,。！？!?；;\s]{0,2}$"
+)
+# 切分子句的标点：只检查命中词所在子句是不是问句，避免「我好了，你累吗？」被后半句问号整句误杀。
+_CLAUSE_SEP_RE = re.compile(r"[，,。！!；;\n]")
 # 0.4.0：更像恋人说话的自然邀请。只在身体层硬条件全成立（欲≥60、关系满格、
 # 日常、不累、醒着、当前私聊）时才当“打开”，不需要“打开成人模式”这种口令。
 # 词取得长一点：“去床上躺会儿”“一起睡午觉”“别忍了，想哭就哭”都不算邀请。
@@ -1349,6 +1364,8 @@ def new_state() -> dict:
         "desire_refresh_30_migrated": False,
         # 主动开口时机策略迁移标记：旧版 proactive.daily_guarantee → schedule_mode
         "proactive_schedule_migrated": False,
+        # 0.4.5 贤者期默认收束配置迁移标记：旧隐藏默认 15m/false → 5m/true
+        "sage_defaults_045_migrated": False,
         "drives": dict(BASELINE),
         "expectation": 0.0,
         "blame_pressure": 0.0,
@@ -1420,9 +1437,27 @@ def new_state() -> dict:
         # key = "owner" / "member:<QQ或昵称>"，不是全局 mode 的替代，
         # 只在当前说话人身上决定"对他/她是不是生气"。
         "anger_targets": {},
-        # 作息：今天熬不熬夜（每天掷一次）、上次被消息吵醒的时间
+        # 作息：今天熬不熬夜（每周期掷一次）、随机推迟/顺延分钟数、通宵欠觉与补睡状态
         "sleep_day": "",
         "sleep_stay_up": False,
+        "sleep_stay_up_minutes": 0,
+        "sleep_wake_shift_minutes": 0,
+        "sleep_all_nighter": False,
+        "sleep_oversleep_day": "",
+        "sleep_oversleep_start_ts": 0.0,
+        "sleep_oversleep_until_ts": 0.0,
+        "sleep_groggy_start_ts": 0.0,
+        "sleep_groggy_until_ts": 0.0,
+        "sleep_groggy_bedtime": "",
+        "sleep_groggy_wake": "",
+        "sleep_an_day": "",
+        "sleep_an_start_ts": 0.0,
+        "sleep_an_wake_ts": 0.0,
+        "sleep_an_nap_earliest_ts": 0.0,
+        "sleep_an_next_bed_ts": 0.0,
+        "sleep_an_max_ts": 0.0,
+        "sleep_nap_start_ts": 0.0,
+        "sleep_nap_until_ts": 0.0,
         "last_woken_ts": 0.0,
         # 今夜被吵醒次数（按作息周期自动清零）：区分鱼主与外人/群友，避免迁怒鱼主
         "woken_night": {
@@ -1559,6 +1594,7 @@ class EmotionCore(Star):
         self._migrate_group_mode()
         self._migrate_desire_refresh()
         self._migrate_proactive_schedule()
+        self._migrate_sage_defaults_045()
         self._cleanup_legacy_advanced_cfg()
         # 成人向总开关关闭时，不保留任何旧的“同意”状态；重新打开也不会
         # 恢复上一次的授权。欲本身可以继续隐藏积累，但身体层永远进不去。
@@ -1782,6 +1818,47 @@ class EmotionCore(Star):
                 "[鱼的心] 配置迁移：proactive.daily_guarantee → schedule_mode=daily_guarantee"
             )
         self.state["proactive_schedule_migrated"] = True
+        self._save_state()
+
+    def _migrate_sage_defaults_045(self) -> None:
+        """0.4.5：把旧版隐藏默认（15 分钟门槛、软收尾不算完成）平滑迁到更自然的新默认（5 分钟、true）。
+
+        只处理真正带 save_config 的 AstrBotConfig，且仅在仍等于旧默认时才改，尊重手动改过的值。
+        """
+        if self.state.get("sage_defaults_045_migrated"):
+            return
+        save = getattr(self.cfg, "save_config", None)
+        if not callable(save):
+            return
+        desire = self.cfg.get("desire") if isinstance(self.cfg, dict) else None
+        if not isinstance(desire, dict):
+            self.state["sage_defaults_045_migrated"] = True
+            self._save_state()
+            return
+        changed = False
+        if "sage_min_scene_minutes" in desire:
+            try:
+                cur_min = float(desire.get("sage_min_scene_minutes"))
+            except (TypeError, ValueError):
+                cur_min = SAGE_MIN_SCENE_MIN
+            if abs(cur_min - 15.0) < 1e-9:
+                desire["sage_min_scene_minutes"] = SAGE_MIN_SCENE_MIN
+                changed = True
+        if desire.get("sage_soft_exit_counts") is False:
+            desire["sage_soft_exit_counts"] = True
+            changed = True
+        if changed:
+            try:
+                save()
+            except Exception as e:
+                logger.warning(
+                    "[鱼的心] 0.4.5 贤者期默认配置迁移写盘失败，下次启动重试: %s", e
+                )
+                return
+            logger.info(
+                "[鱼的心] 0.4.5 迁移：sage_min_scene_minutes 15→5，sage_soft_exit_counts false→true"
+            )
+        self.state["sage_defaults_045_migrated"] = True
         self._save_state()
 
     def _cleanup_legacy_advanced_cfg(self) -> None:
@@ -2241,6 +2318,7 @@ class EmotionCore(Star):
         st["adult_ask_until"] = 0.0
         st["adult_scene_started_ts"] = 0.0
         st["adult_scene_intimate"] = False
+        st["adult_doc_scene_done"] = False
         st["last_desire_sig"] = ""
         if hours > 0:
             st["sage_until"] = time.time() + hours * 3600.0
@@ -2517,13 +2595,24 @@ class EmotionCore(Star):
         if minutes <= 0:
             return
         st = self.state
-        # 只有「开一个新场景」才重置计时；场景内续接不算重新开始。
-        if float(st.get("adult_scene_consent_until", 0.0) or 0.0) <= time.time():
-            st["adult_scene_started_ts"] = time.time()
+        # 只有「开一个新场景」才重置计时；场景内续接、或 /adult on 下近期已开场的场景不覆盖起点。
+        now_ts = time.time()
+        old_started = float(st.get("adult_scene_started_ts", 0.0) or 0.0)
+        recent_doc_scene = (
+            bool(st.get("adult_doc_scene_done"))
+            and old_started > 0
+            and (now_ts - old_started) <= SAGE_SOFT_MAX_SCENE_HOURS * 3600.0
+        )
+        if float(st.get("adult_scene_consent_until", 0.0) or 0.0) <= now_ts:
+            if not recent_doc_scene:
+                st["adult_scene_started_ts"] = now_ts
             # 明确邀请/强肯定开的场景才算「亲密场景」；
-            # 只靠「抱我/亲我」这类软邀请续上的不算。
-            st["adult_scene_intimate"] = source in ("自然邀请", "自然语言肯定")
-        st["adult_scene_consent_until"] = time.time() + minutes * 60.0
+            # 只靠「抱我/亲我」这类软邀请续上的不算（已点亮的不回退）。
+            if source in ("自然邀请", "自然语言肯定"):
+                st["adult_scene_intimate"] = True
+            elif not recent_doc_scene:
+                st["adult_scene_intimate"] = False
+        st["adult_scene_consent_until"] = now_ts + minutes * 60.0
         st["adult_paused"] = False
         st["adult_paused_reason"] = ""
         st["adult_ask_until"] = 0.0
@@ -2539,6 +2628,7 @@ class EmotionCore(Star):
         st["adult_ask_until"] = 0.0
         st["adult_scene_started_ts"] = 0.0
         st["adult_scene_intimate"] = False
+        st["adult_doc_scene_done"] = False
         logger.info("[鱼的心] 成人向已暂停（%s）", reason)
 
     def _soft_exit_adult(self, reason: str = "自然收尾") -> None:
@@ -2550,16 +2640,29 @@ class EmotionCore(Star):
         st["adult_ask_until"] = 0.0
         st["adult_scene_started_ts"] = 0.0
         st["adult_scene_intimate"] = False
+        st["adult_doc_scene_done"] = False
         logger.info("[鱼的心] 成人向自然收尾（%s）", reason)
 
     @staticmethod
+    def _clause_bounds(raw: str, idx: int) -> tuple[int, int]:
+        """返回字符位置 idx 所在子句在 raw 中的 [start, end) 范围。"""
+        start = 0
+        for m in _CLAUSE_SEP_RE.finditer(raw, 0, idx):
+            start = m.end()
+        m_end = _CLAUSE_SEP_RE.search(raw, idx)
+        end = m_end.start() if m_end else len(raw)
+        return start, end
+
+    @staticmethod
     def _is_soft_exit(raw: str) -> bool:
-        """软收尾匹配：排除否定和问句，避免“不困了/不够了/睡了吗”误触发。"""
+        """软收尾匹配：排除否定和问句，避免“不困了/不够了/不累/睡了吗”误触发。"""
         if re.search(r"[?？]\s*$", raw) or re.search(
             r"(?:吗|么|没有)\s*$", raw
         ):
             return False
         if "不够" in raw or "不困" in raw or "没困" in raw:
+            return False
+        if "不累" in raw or "没累" in raw:
             return False
         if "不休息" in raw or "没休息" in raw:
             return False
@@ -2568,9 +2671,7 @@ class EmotionCore(Star):
         return any(p in raw for p in ADULT_SOFT_EXIT)
 
     def _is_finish(self, raw: str) -> bool:
-        """亲密完成匹配：排除问句、否定、揣测（「结束了吧」）和「我到了+地点」。"""
-        if re.search(r"[?？]\s*$", raw) or re.search(r"(?:吗|么)\s*$", raw):
-            return False
+        """亲密完成匹配：按子句排除问句、否定、揣测（「结束了吧」）、日常事务和「我到了+地点」。"""
         if (
             "没结束" in raw or "没到" in raw or "不到" in raw
             or "不想结束" in raw or "别结束" in raw
@@ -2583,7 +2684,13 @@ class EmotionCore(Star):
             words.extend(str(w) for w in extra if str(w).strip())
         for p in words:
             if p == "我到了":
-                if _FINISH_ARRIVE_RE.search(raw):
+                for m in _FINISH_ARRIVE_RE.finditer(raw):
+                    cs, ce = self._clause_bounds(raw, m.start())
+                    clause = raw[cs:ce]
+                    if re.search(r"(?:[?？]|[吗么])\s*$", clause):
+                        continue
+                    if _FINISH_HEAD_NEG_RE.search(raw[cs:m.start()]):
+                        continue
                     return True
                 continue
             start = 0
@@ -2592,9 +2699,15 @@ class EmotionCore(Star):
                 if idx < 0:
                     break
                 start = idx + 1
-                if _FINISH_HEAD_NEG_RE.search(raw[:idx]):
+                cs, ce = self._clause_bounds(raw, idx)
+                clause = raw[cs:ce]
+                if re.search(r"(?:[?？]|[吗么])\s*$", clause):
                     continue
-                if _FINISH_TAIL_Q_RE.match(raw[idx + len(p):]):
+                if _FINISH_HEAD_NEG_RE.search(raw[cs:idx]):
+                    continue
+                if _FINISH_NON_INTIMATE_HEAD_RE.search(raw[cs:idx]):
+                    continue
+                if _FINISH_TAIL_Q_RE.match(raw[idx + len(p):ce]):
                     continue
                 return True
         return False
@@ -2602,7 +2715,7 @@ class EmotionCore(Star):
     def _update_adult_consent(
         self, event: AstrMessageEvent, text: str, umo: str
     ) -> bool:
-        """从私聊鱼主的话里识别“明确同意/暂停”。
+        """从私聊鱼主的话里识别“明确同意/暂停/亲密完成”。
 
         只做确定性短语匹配：不猜语气、不猜欲、不把暧昧当同意；
         群聊/陌生人/未解锁/欲总开关关闭时完全不参与。
@@ -2627,10 +2740,6 @@ class EmotionCore(Star):
         if self._sage_active():
             return False
 
-        # “想不想/要不要/可不可以”是提问，不是同意，也不是暂停。
-        if re.search(r"想不想|要不要|可不可以|能不能", raw):
-            return False
-
         # 先摘掉肯定短语和“不要紧/不用/没事”这类非暂停用法。
         probe = raw
         # 只摘掉真正的肯定/邀请；不要把“可以继续”整段摘掉，否则
@@ -2644,16 +2753,42 @@ class EmotionCore(Star):
         for p in ADULT_STOP_EXEMPT:
             probe = probe.replace(p, "")
 
-        # “结束了吗”是在问，不是在喊停。
-        if re.search(r"结束(?:了)?(?:吗|么|没有|[?？])", raw):
+        # “结束了吗”是在问，不是在喊停（仅当不含其他明确完成词时提前返回）。
+        finish_hit = self._is_finish(raw)
+        if not finish_hit and re.search(r"结束(?:了)?(?:吗|么|没有|[?？])", raw):
             return False
+
+        sage_enabled = bool(self._cfg("desire.sage_enabled", True))
+        # /adult on 长期同意下身体层已开启、对话内已建立场景、或本轮 3 小时内确实进过成人场景
+        # （即使聊到最后疲惫刚跨过 65 或刚过入睡点，完事那一刻仍应正常收束进贤者期）。
+        now_ts = time.time()
+        _started_ts = float(st.get("adult_scene_started_ts", 0.0) or 0.0)
+        recent_active_scene = (
+            self._adult_consent_active()
+            and not st.get("adult_paused")
+            and self._desire_bond_full()
+            and float(st.get("desire", 0.0) or 0.0) >= DESIRE_ADULT_AT
+            and (
+                bool(st.get("adult_doc_scene_done"))
+                or bool(st.get("adult_scene_intimate"))
+                or (_started_ts > 0 and (now_ts - _started_ts) <= SAGE_SOFT_MAX_SCENE_HOURS * 3600.0)
+            )
+        )
+        in_adult = (
+            self._adult_scene_active()
+            or self._adult_layer_allowed(umo)
+            or recent_active_scene
+        )
+        has_discomfort = any(p in raw for p in ADULT_DISCOMFORT_WORDS)
 
         stop_hit = (
             any(p in probe for p in ADULT_STOP)
             or bool(ADULT_STOP_RE.search(probe))
             or bool(re.search(r"(^|[，,。！？!?\s])停($|[，,。！？!?\s])", probe))
         )
-        if stop_hit:
+        # 身体不适永远优先喊停；否则若同句含明确完成词（如「不要了，我到了」「停一下，完事了」），
+        # 交由下面的贤者期结算（贤者期本身就会立即暂停身体层，同时正常掉欲）。
+        if stop_hit and (has_discomfort or not (sage_enabled and in_adult and finish_hit)):
             # 只有成人语境已经建立时才把“不要”当成暂停；日常里说“不要”
             # 不该把未来的同意状态一并冻住。
             if (
@@ -2664,46 +2799,60 @@ class EmotionCore(Star):
                 self._pause_adult("明确说了停/不要")
             return False
 
-        # 亲密完成：场景已经建立、持续够久，又出现事后收束词 → 贤者模式。
+        # 亲密完成：场景或成人层已激活，又出现明确完成词或亲密互动后的自然软收尾 → 贤者模式。
         # 排在「软收尾」之前：完成要掉欲，普通收尾不掉。
-        # 可选（默认关）：亲密场景里的「晚安 / 抱一会儿就好」也算完成。
-        # 只认本场景出现过明确成人邀请（adult_scene_intimate）的，
-        # 纯抱抱、纯闲聊的晚安仍然只收尾。
+        # 软收尾算完成默认开启，但严守两道护栏防日常晚安误触：
+        #   1) 本轮确有明确亲密互动（adult_scene_intimate 或本句带 ADULT_DESIRE_RE）
+        #   2) 场景时长落在 [sage_min_scene_minutes, 3 小时] 内
+        soft_exit_hit = self._is_soft_exit(raw)
         soft_finish = (
-            bool(self._cfg("desire.sage_soft_exit_counts", False))
-            # 本场景出现过明确邀请，或这句话本身就带着明确邀请
+            bool(self._cfg("desire.sage_soft_exit_counts", True))
             and (
                 bool(st.get("adult_scene_intimate"))
                 or bool(ADULT_DESIRE_RE.search(raw))
             )
-            and self._is_soft_exit(raw)
+            and soft_exit_hit
         )
-        if (
-            bool(self._cfg("desire.sage_enabled", True))
-            and self._adult_scene_active()
-            and (self._is_finish(raw) or soft_finish)
-        ):
+        if sage_enabled and in_adult and (finish_hit or soft_finish):
             started = float(st.get("adult_scene_started_ts", 0.0) or 0.0)
             try:
-                need_min = float(
-                    self._cfg("desire.sage_min_scene_minutes", SAGE_MIN_SCENE_MIN)
-                    or 0.0
+                need_min = max(
+                    0.0,
+                    float(
+                        self._cfg("desire.sage_min_scene_minutes", SAGE_MIN_SCENE_MIN)
+                        or 0.0
+                    ),
                 )
             except (TypeError, ValueError):
                 need_min = SAGE_MIN_SCENE_MIN
-            if started <= 0 or time.time() - started >= max(0.0, need_min) * 60.0:
-                self._apply_sage("亲密完成")
+            now_ts = time.time()
+            elapsed = (now_ts - started) if started > 0 else -1.0
+            if finish_hit:
+                # 明确完成词：只需满足较短的最短时长（默认 2 分钟，若配置比 2 更小则按配置）
+                finish_need = min(need_min, SAGE_FINISH_MIN_SCENE_MIN)
+                if started <= 0 or elapsed >= finish_need * 60.0:
+                    self._apply_sage("亲密完成")
+                    return False
+                # 时长不够：不扣欲，但也关掉场景，避免停在半路
+                self._soft_exit_adult("完成词但时长不够")
                 return False
-            # 时长不够：不扣欲，但也关掉场景，避免停在半路
-            self._soft_exit_adult("完成词但时长不够")
-            return False
+            # 软收尾算完成：必须有明确起算时间，且在 [need_min, 3h] 窗口内
+            if (
+                started > 0
+                and elapsed >= need_min * 60.0
+                and elapsed <= SAGE_SOFT_MAX_SCENE_HOURS * 3600.0
+            ):
+                self._apply_sage("亲密完成（自然收尾）")
+                return False
 
         # 晚安/先这样/抱一会儿就好：当前场景已建立，或纯 /adult on 且
         # 成人层此刻确实可用时，都自然收尾；问句/否定由 _is_soft_exit 排除。
-        if self._is_soft_exit(raw) and (
-            self._adult_scene_active() or self._adult_layer_allowed(umo)
-        ):
+        if soft_exit_hit and in_adult:
             self._soft_exit_adult()
+            return False
+
+        # “想不想/要不要/可不可以”是提问，不是同意/邀请（放在喊停与收尾之后，不误拦「完事了，要不要去洗澡」）。
+        if re.search(r"想不想|要不要|可不可以|能不能", raw):
             return False
 
         # 自然的邀请：只在身体层硬条件全成立时才算“打开”，不靠
@@ -2745,7 +2894,7 @@ class EmotionCore(Star):
     def _note_adult_desire(
         self, event: AstrMessageEvent, text: str, umo: str
     ) -> None:
-        """成人场景里他明确表达“想要她”时，额外推高欲。"""
+        """成人场景里他明确表达“想要她”时，额外推高欲并记下亲密场景起点。"""
         if not self._adult_enabled():
             return
         if not bool(self._cfg("desire.enabled", True)):
@@ -2773,7 +2922,12 @@ class EmotionCore(Star):
             return
         if not ADULT_DESIRE_RE.search(text or ""):
             return
-        # 本场景出现过明确的"想要她"，之后用「晚安」收尾才算亲密完成。
+        # 本场景出现过明确的"想要她"：记录亲密标记与起点（即使是通过 /adult on 长期同意进入的）；
+        # 若距上次起点已超过 3 小时则视为新一轮重新计时，避免隔半天说晚安误判。
+        now_ts = time.time()
+        old_started = float(st.get("adult_scene_started_ts", 0.0) or 0.0)
+        if old_started <= 0 or (now_ts - old_started) > SAGE_SOFT_MAX_SCENE_HOURS * 3600.0:
+            st["adult_scene_started_ts"] = now_ts
         st["adult_scene_intimate"] = True
         old = float(st.get("desire", 0.0) or 0.0)
         gain = 3.0 * self._desire_gain_scale()
@@ -2992,7 +3146,8 @@ class EmotionCore(Star):
         # 休息时间被外人/群友喊醒：不扣压力/疲惫也不记「被吵醒」，但按今晚总吵醒次数
         # 注入犯困/不耐烦/起床气提示（不泄露对鱼主的依恋/亲密）。
         now_dt = datetime.now()
-        if self._sleep_info(now_dt).get("asleep"):
+        sleep_info = self._sleep_info(now_dt)
+        if sleep_info.get("asleep"):
             wn_before = int(self._woken_night_state(now_dt).get("outsider", 0) or 0)
             wn_after = self._bump_woken_night(
                 is_owner=False, now_ts=now_dt.timestamp(), now_dt=now_dt
@@ -3003,6 +3158,15 @@ class EmotionCore(Star):
             # 仅在吵醒次数实际 +1（2 分钟防抖命中）时立刻落盘，避免半夜大群刷屏写盘风暴
             if int(wn_after.get("outsider", 0) or 0) != wn_before:
                 self._save_state()
+        elif (
+            sleep_info.get("all_nighter_debt")
+            or sleep_info.get("groggy")
+            or (sleep_info.get("in_base_sleep") and (sleep_info.get("stay_up") or sleep_info.get("all_nighter")))
+        ):
+            # 深夜熬夜/通宵、通宵天亮后强撑或普通熬夜刚醒没睡饱：只注入轻量状态，不算吵醒也不写盘
+            sleep_block = self._sleep_injection(now_dt, for_owner=False)
+            if sleep_block:
+                self._attach_injection(request, sleep_block)
         if effect == "none":
             if log_affect:
                 self._log_affect(
@@ -3225,11 +3389,21 @@ class EmotionCore(Star):
         st = self.state
         drives = st["drives"]
         n = max(1, min(int(missed or 1), MAX_CATCHUP_TICKS))
+        # 先结算通宵欠觉进入 / 补睡醒来恢复 / 拖到下一晚自动入睡，并触发新周期作息掷骰
+        # （即使关闭主动说话且无人发消息，纯心跳也能按时初始化熬夜/通宵/次晨没睡饱状态）
+        now_dt = datetime.now()
+        self._sync_sleep_state(now_dt)
+        self._sleep_info(now_dt)
+        in_debt = self._is_in_all_nighter_debt(now_dt)
+        in_nap = self._is_in_catch_up_nap(now_dt)
         # 1) 向基线回落（依恋/亲密在 DECAY_RATE 里单独慢一档；
-        #    tuning.recovery_scale 只在疲惫/压力高于基线时加速恢复，不拉快反向漂移，也不动依恋/亲密）
+        #    tuning.recovery_scale 只在疲惫/压力高于基线时加速恢复，不拉快反向漂移，也不动依恋/亲密；
+        #    通宵欠觉或正在补睡期间严格不减疲惫）
         rec_scale = self._recovery_scale()
         for k, base in BASELINE.items():
             cur = float(drives.get(k, base))
+            if k == "fatigue" and (in_debt or in_nap) and cur > base:
+                continue
             rate = DECAY_RATE[k]
             if k in ("fatigue", "stress") and cur > base:
                 rate = min(0.95, rate * rec_scale)
@@ -3237,14 +3411,26 @@ class EmotionCore(Star):
                 drives[k] = cur + (base - cur) * rate
             else:
                 drives[k] = base + (cur - base) * (1.0 - rate) ** n
-        # 1.5) 睡了一觉：安静够久，疲惫不该还挂在那儿
+        # 1.4) 通宵欠觉未补睡时，疲惫随时间稳步上涨，到达 95 且过最早补睡时间后自动入睡补觉
+        if in_debt and not in_nap:
+            f_gain = 3.0 * self._fatigue_scale() * min(n, 8)
+            if f_gain > 0:
+                drives["fatigue"] = clamp(float(drives.get("fatigue", BASELINE["fatigue"])) + f_gain)
+            self._maybe_start_catch_up_nap(now_dt)
+            in_nap = self._is_in_catch_up_nap(now_dt)
+        # 1.5) 睡了一觉：安静够久，疲惫不该还挂在那儿（通宵欠觉或补睡中跳过此重置）
         last_act = max(
             float(st.get("last_user_msg", 0) or 0),
             float(st.get("last_owner_group_msg", 0) or 0),
             float(st.get("last_assistant_msg", 0) or 0),
             float(st.get("last_proactive", 0) or 0),
         )
-        if last_act and time.time() - last_act >= SLEEP_IDLE_HOURS * 3600:
+        if (
+            not in_debt
+            and not in_nap
+            and last_act
+            and time.time() - last_act >= SLEEP_IDLE_HOURS * 3600
+        ):
             if drives["fatigue"] > SLEEP_FATIGUE_AFTER:
                 self._dbg(
                     "安静了 %.0f 小时，疲惫 %.0f → %.0f",
@@ -3758,6 +3944,9 @@ class EmotionCore(Star):
                 applied[k] = applied.get(k, 0.0) + (st["expectation"] - old_e)
             elif k in drives:
                 old = float(drives.get(k, BASELINE[k]))
+                if delta < 0 and k == "fatigue" and self._is_in_all_nighter_debt():
+                    # 通宵欠觉期间严格禁止事件减疲惫
+                    continue
                 if delta > 0 and k == "fatigue":
                     # 越累越难更累：留个 25% 的下限，长聊仍然比短聊累
                     delta *= max(
@@ -4234,9 +4423,23 @@ class EmotionCore(Star):
             # 免得之后重新打开注入时在场景中途补注。
             if self._adult_layer_allowed(umo):
                 st["adult_doc_scene_done"] = True
+                if float(st.get("adult_scene_started_ts", 0.0) or 0.0) <= 0:
+                    st["adult_scene_started_ts"] = time.time()
             return
         if not self._adult_layer_allowed(umo):
             st["adult_doc_scene_done"] = False
+            # 仅在真正退出授权/暂停/欲跌破门槛/关系未满时清理场景计时；
+            # 若只是聊到一半疲惫刚过 65 或刚过入睡点，保留起点让完事那句仍能正常收束进贤者期。
+            truly_left = (
+                not (self._adult_scene_active() or self._adult_consent_active())
+                or bool(st.get("adult_paused"))
+                or self._sage_active()
+                or not self._desire_bond_full()
+                or float(st.get("desire", 0.0) or 0.0) < DESIRE_ADULT_AT
+            )
+            if truly_left:
+                st["adult_scene_started_ts"] = 0.0
+                st["adult_scene_intimate"] = False
             return
         if st.get("adult_doc_scene_done"):
             return
@@ -4253,6 +4456,8 @@ class EmotionCore(Star):
             return
         st["adult_doc_scene_done"] = True
         st["adult_mode_doc_ts"] = time.time()
+        if float(st.get("adult_scene_started_ts", 0.0) or 0.0) <= 0:
+            st["adult_scene_started_ts"] = time.time()
         self._dbg("已注入成人模式写法（%d 字）", len(spec))
 
     @filter.on_llm_request(priority=INJECT_PRIORITY)
@@ -4291,6 +4496,10 @@ class EmotionCore(Star):
             base_mode_before = mode_of(float(self.state.get("blame_pressure", 0.0)))
             turn_mode_before = self._mode_for_speaker(speaker_key, base_mode_before)
             speaker_is_target = self._is_anger_target(speaker_key)
+            # 先同步最新作息状态（如补睡刚醒恢复疲惫、新周期掷骰），避免本轮事件与欲/成人判定读到过期的疲惫或欠觉状态
+            now_dt = datetime.now()
+            self._sync_sleep_state(now_dt)
+            self._sleep_info(now_dt)
             log_affect = self._affect_log_enabled()
             affect_before = self._mood_snapshot() if log_affect else None
             event_log: list[dict] = []
@@ -4412,7 +4621,6 @@ class EmotionCore(Star):
                 or owner_sender
                 or (not bool(self._cfg_group("enabled", False)))
             )
-            now_dt = datetime.now()
             if self._sleep_info(now_dt).get("asleep"):
                 self._bump_woken_night(is_owner=woken_is_owner, now_ts=now, now_dt=now_dt)
                 woken = bool(self._note_woken(now))
@@ -4486,6 +4694,7 @@ class EmotionCore(Star):
             # 回避档：允许她"看见了不回"。必须放在注入之前——被无视的这一轮
             # 不能占用心境报到的名额，否则她下一条真回复会以为自己已经知道心境了。
             if self._maybe_go_silent(event, events, text, is_group):
+                self._maybe_start_catch_up_nap(now_dt)
                 self._save_state()
                 return
 
@@ -4520,9 +4729,18 @@ class EmotionCore(Star):
                 self._dbg("已注入主动的欲: %s", desire_block.replace("\n", " / "))
 
             # 睡眠状态单独注入：它不受心境节流影响，睡着时每一轮都要让她知道
-            sleep_block = self._sleep_injection(datetime.now(), for_owner=woken_is_owner)
+            sleep_block = self._sleep_injection(now_dt, for_owner=woken_is_owner)
             if sleep_block:
                 self._attach_injection(request, sleep_block)
+            # 若本轮对话把疲惫推到了 95+（且已过通宵起床缓冲期），回完本句后进入补睡，
+            # 避免同一句里前一秒还醒着聊、后一秒就被判成「补睡中被吵醒」。
+            self._maybe_start_catch_up_nap(now_dt)
+
+            # 鱼主主动问起相识第几天 / 生日 / 纪念日时，按需补一段轻量事实（平时 0 消耗，不受心境节流影响）
+            if woken_is_owner and self._cfg("inject.enabled", True):
+                sd_query_block = self._special_day_query_injection(text)
+                if sd_query_block and self._attach_injection(request, sd_query_block):
+                    self._dbg("已按需注入特别的日子事实")
 
             # 她沉默那几条不会进 AstrBot 的对话历史（请求被终止了），
             # 所以在这里把"没接住的话"补给她，免得她真的失忆。
@@ -6776,13 +6994,8 @@ class EmotionCore(Star):
 
     # ---------------- 作息 ----------------
 
-    def _logical_day(self, now: datetime | None = None) -> str:
-        """作息周期计日：开启作息时以 `sleep.wake` 起床时间为一天分界，关闭作息退回自然日。
-
-        例如 01:00 睡、08:00 起，次日 00:30 还没到 08:00 起床，仍归属昨天这一轮，
-        避免熬夜跨零点时每日收益、主动次数、睡前兜底、「想你」和小气象突然重置。
-        生日与纪念日不走这里，始终按真实日历日期计算。
-        """
+    def _base_logical_day(self, now: datetime | None = None) -> str:
+        """按配置的 `sleep.wake` 切分的基础作息日（不含顺延/通宵暂留）。"""
         dt = now or datetime.now()
         if self._cfg("sleep.enabled", True):
             bedtime = parse_clock(str(self._cfg("sleep.bedtime", "23:30")))
@@ -6794,16 +7007,244 @@ class EmotionCore(Star):
                     return (dt - timedelta(days=1)).strftime("%Y-%m-%d")
         return dt.strftime("%Y-%m-%d")
 
-    def _sleep_info(self, now: datetime | None = None) -> dict:
-        """她现在的作息：睡没睡、几点睡/起、今晚有没有熬夜。
+    def _logical_day(self, now: datetime | None = None) -> str:
+        """作息周期计日：开启作息时按真正起床时间切新的一天，关闭作息退回自然日。
 
-        每天第一次调用时掷一次"今天熬不熬夜"（`sleep.stay_up_chance`），
-        熬夜会把入睡时间往后推 `sleep.stay_up_hours` 小时。
+        - 普通作息 / 普通熬夜：按配置的 `sleep.wake` 切天；
+        - 顺延起床（熬夜距起床 2–4h）：延长至真正顺延起床时刻才切第二天；
+        - 通宵（熬夜距起床 <2h）：延长至真正补睡睡醒（或次晚睡醒）才切第二天。
+        生日与纪念日不走这里，始终按真实日历日期计算。
         """
+        dt = now or datetime.now()
+        base_day = self._base_logical_day(dt)
+        if not self._cfg("sleep.enabled", True):
+            return base_day
+        st = self.state
+        dt_ts = dt.timestamp()
+        # 1) 顺延起床尚未醒来：仍归属昨夜那一轮
+        os_day = str(st.get("sleep_oversleep_day") or "")
+        os_start = float(st.get("sleep_oversleep_start_ts", 0.0) or 0.0)
+        os_until = float(st.get("sleep_oversleep_until_ts", 0.0) or 0.0)
+        if os_day and os_start > 0 and os_start <= dt_ts < os_until:
+            return os_day
+        # 2) 通宵欠觉 / 补睡尚未睡醒：仍归属通宵那一轮，直到补睡醒来才切第二天
+        an_day = str(st.get("sleep_an_day") or "")
+        an_start = float(st.get("sleep_an_start_ts", 0.0) or 0.0)
+        an_max = float(st.get("sleep_an_max_ts", 0.0) or 0.0)
+        nap_until = float(st.get("sleep_nap_until_ts", 0.0) or 0.0)
+        if an_day and an_start > 0:
+            end_ts = nap_until if nap_until > 0 else an_max
+            if end_ts > an_start and an_start <= dt_ts < end_ts:
+                return an_day
+        return base_day
+
+    @staticmethod
+    def _cycle_window_dts(plan_day: str, b0: int, w: int) -> tuple[datetime, datetime]:
+        """返回逻辑日 `plan_day` 对应那晚的 (平时入睡 datetime, 平时起床 datetime)。"""
+        d = datetime.strptime(plan_day, "%Y-%m-%d")
+        sleep_len = (w - b0) % 1440
+        wake_dt = (d + timedelta(days=1)).replace(
+            hour=w // 60, minute=w % 60, second=0, microsecond=0
+        )
+        bed_dt = wake_dt - timedelta(minutes=sleep_len)
+        return bed_dt, wake_dt
+
+    @staticmethod
+    def _roll_stay_up_plan(sleep_len: int) -> tuple[int, int, bool]:
+        """在入睡到起床之间按 5 分钟步长均匀随机决定今晚熬夜方案，返回 (入睡推迟分钟, 起床顺延分钟, 是否通宵)。
+
+        - 距起床 >= 240 分钟（>=4h）：普通熬夜，按原起床时间醒（醒后带 2 小时没睡饱/小起床气）
+        - 距起床 120–239 分钟（2–4h）：顺延起床，随机推迟起床使本晚总睡眠补到 5–7 小时
+        - 距起床 < 120 分钟（<2h）：算作通宵（整晚不睡、进入通宵欠觉）
+        """
+        if sleep_len <= 0:
+            return 0, 0, False
+        if sleep_len < 120:
+            return 0, 0, True
+        min_step = min(3, max(1, sleep_len // 5))
+        max_step = max(min_step, sleep_len // 5)
+        shift = random.randint(min_step, max_step) * 5
+        rem = sleep_len - shift
+        if rem < 120:
+            return 0, 0, True
+        if rem < 240:
+            max_extra = max(30, min(300, 1440 - sleep_len - 120))
+            target_lo = min(max(rem + 30, 300), rem + max_extra)
+            target_hi = min(max(target_lo, min(sleep_len, 420)), rem + max_extra)
+            lo_step = max(1, int(round((target_lo - rem) / 5.0)))
+            hi_step = max(lo_step, int(round((target_hi - rem) / 5.0)))
+            wake_shift = random.randint(lo_step, hi_step) * 5
+            return shift, wake_shift, False
+        return shift, 0, False
+
+    def _clear_all_nighter_state(self) -> None:
+        st = self.state
+        st["sleep_an_day"] = ""
+        st["sleep_an_start_ts"] = 0.0
+        st["sleep_an_wake_ts"] = 0.0
+        st["sleep_an_nap_earliest_ts"] = 0.0
+        st["sleep_an_next_bed_ts"] = 0.0
+        st["sleep_an_max_ts"] = 0.0
+        st["sleep_nap_start_ts"] = 0.0
+        st["sleep_nap_until_ts"] = 0.0
+
+    def _init_stay_up_windows(
+        self,
+        plan_day: str,
+        b0: int,
+        w: int,
+        shift: int,
+        wake_shift: int,
+        all_nighter: bool,
+    ) -> None:
+        """为本周期的熬夜/顺延/通宵计划统一写入时间戳窗口（新鲜掷骰与兼容升级共用）。"""
+        st = self.state
+        bed_dt, wake_dt = self._cycle_window_dts(plan_day, b0, w)
+        if all_nighter:
+            st["sleep_an_day"] = plan_day
+            st["sleep_an_start_ts"] = bed_dt.timestamp()
+            st["sleep_an_wake_ts"] = wake_dt.timestamp()
+            buf_min = random.randint(12, 30) * 5  # 60–150 分钟
+            st["sleep_an_nap_earliest_ts"] = (wake_dt + timedelta(minutes=buf_min)).timestamp()
+            st["sleep_an_next_bed_ts"] = (bed_dt + timedelta(days=1)).timestamp()
+            st["sleep_an_max_ts"] = (wake_dt + timedelta(days=1)).timestamp()
+            st["sleep_nap_start_ts"] = 0.0
+            st["sleep_nap_until_ts"] = 0.0
+        elif wake_shift > 0:
+            st["sleep_oversleep_day"] = plan_day
+            st["sleep_oversleep_start_ts"] = wake_dt.timestamp()
+            st["sleep_oversleep_until_ts"] = (
+                wake_dt + timedelta(minutes=wake_shift)
+            ).timestamp()
+
+    def _is_in_catch_up_nap(self, now: datetime | None = None) -> bool:
+        dt = now or datetime.now()
+        dt_ts = dt.timestamp()
+        nap_start = float(self.state.get("sleep_nap_start_ts", 0.0) or 0.0)
+        nap_until = float(self.state.get("sleep_nap_until_ts", 0.0) or 0.0)
+        return nap_until > 0 and nap_start <= dt_ts < nap_until
+
+    def _is_in_all_nighter_debt(self, now: datetime | None = None) -> bool:
+        if not self._cfg("sleep.enabled", True):
+            return False
+        st = self.state
+        dt = now or datetime.now()
+        dt_ts = dt.timestamp()
+        an_start = float(st.get("sleep_an_start_ts", 0.0) or 0.0)
+        an_max = float(st.get("sleep_an_max_ts", 0.0) or 0.0)
+        nap_until = float(st.get("sleep_nap_until_ts", 0.0) or 0.0)
+        if not st.get("sleep_an_day") or an_start <= 0:
+            return False
+        end_ts = nap_until if nap_until > 0 else an_max
+        return end_ts > an_start and an_start <= dt_ts < end_ts
+
+    def _sync_sleep_state(self, now: datetime | None = None) -> None:
+        """结算作息状态转换：拖到次晚自动入睡、补睡醒来恢复疲惫、清理过期窗口。"""
+        st = self.state
+        dt = now or datetime.now()
+        dt_ts = dt.timestamp()
+
+        # 1) 补睡醒来：清除通宵欠觉，疲惫恢复至 30 并记一笔「补睡」
+        nap_until = float(st.get("sleep_nap_until_ts", 0.0) or 0.0)
+        if nap_until > 0 and dt_ts >= nap_until:
+            drives = st.get("drives") or {}
+            old_f = float(drives.get("fatigue", BASELINE["fatigue"]))
+            if old_f > 30.0:
+                drives["fatigue"] = 30.0
+                self._note_event("catch_up_nap", {"fatigue": 30.0 - old_f}, 1.0)
+            self._clear_all_nighter_state()
+        else:
+            # 2) 通宵状态生命周期维护
+            an_day = str(st.get("sleep_an_day") or "")
+            an_start = float(st.get("sleep_an_start_ts", 0.0) or 0.0)
+            an_next_bed = float(st.get("sleep_an_next_bed_ts", 0.0) or 0.0)
+            an_max = float(st.get("sleep_an_max_ts", 0.0) or 0.0)
+            if an_day and an_max > 0 and dt_ts >= an_max:
+                # 长时间离线跨过次晚睡眠：视作已睡过一夜，恢复疲惫并清掉欠觉
+                if an_start > 0:
+                    drives = st.get("drives") or {}
+                    old_f = float(drives.get("fatigue", BASELINE["fatigue"]))
+                    if old_f > 30.0:
+                        drives["fatigue"] = 30.0
+                        self._note_event("catch_up_nap", {"fatigue": 30.0 - old_f}, 1.0)
+                self._clear_all_nighter_state()
+            elif (
+                an_day
+                and nap_until <= 0
+                and an_next_bed > 0
+                and an_next_bed <= dt_ts < an_max
+            ):
+                # 整天没冲到 95，拖到第二天正常入睡时间则直接进入整夜补觉
+                st["sleep_nap_start_ts"] = an_next_bed
+                st["sleep_nap_until_ts"] = an_max
+
+        # 3) 清理已结束的顺延起床 / 刚醒没睡饱标记
+        os_until = float(st.get("sleep_oversleep_until_ts", 0.0) or 0.0)
+        if os_until > 0 and dt_ts >= os_until:
+            st["sleep_oversleep_day"] = ""
+            st["sleep_oversleep_start_ts"] = 0.0
+            st["sleep_oversleep_until_ts"] = 0.0
+        gr_until = float(st.get("sleep_groggy_until_ts", 0.0) or 0.0)
+        if gr_until > 0 and dt_ts >= gr_until:
+            st["sleep_groggy_start_ts"] = 0.0
+            st["sleep_groggy_until_ts"] = 0.0
+            st["sleep_groggy_bedtime"] = ""
+            st["sleep_groggy_wake"] = ""
+
+    def _maybe_start_catch_up_nap(self, now: datetime | None = None) -> bool:
+        """通宵欠觉前提下：疲惫 >= 95 且已过正常起床后一段缓冲期时，开启补睡（3–5h，临近入睡则并入整夜）。"""
+        if not self._cfg("sleep.enabled", True):
+            return False
+        dt = now or datetime.now()
+        self._sync_sleep_state(dt)
+        st = self.state
+        if not self._is_in_all_nighter_debt(dt) or self._is_in_catch_up_nap(dt):
+            return False
+        fatigue = float((st.get("drives") or {}).get("fatigue", 0.0) or 0.0)
+        if fatigue < 95.0:
+            return False
+        dt_ts = dt.timestamp()
+        earliest = float(st.get("sleep_an_nap_earliest_ts", 0.0) or 0.0)
+        if earliest > 0 and dt_ts < earliest:
+            # 仍在正常作息时间或刚过起床不久：不可立刻睡，继续强撑通宵
+            return False
+        next_bed = float(st.get("sleep_an_next_bed_ts", 0.0) or 0.0)
+        an_max = float(st.get("sleep_an_max_ts", 0.0) or 0.0)
+        st["sleep_nap_start_ts"] = dt_ts
+        if next_bed > 0 and an_max > dt_ts and (next_bed - dt_ts) <= 2 * 3600:
+            # 距今晚正常入睡不足 2 小时：直接提前入睡到明早起床点
+            st["sleep_nap_until_ts"] = an_max
+        else:
+            # 常规补睡：3–5 小时（180–300 分钟，按 5 分钟取整）
+            nap_min = random.randint(36, 60) * 5
+            until_ts = dt_ts + nap_min * 60
+            if next_bed > 0 and an_max > dt_ts and until_ts >= next_bed:
+                # 补睡终点已跨进/越过今晚正常入睡点：直接并入整夜睡到明早，避免半夜秒醒又秒睡
+                until_ts = an_max
+            elif an_max > dt_ts:
+                until_ts = min(until_ts, an_max)
+            st["sleep_nap_until_ts"] = until_ts
+        return True
+
+    def _sleep_info(self, now: datetime | None = None) -> dict:
+        """她现在的作息：睡没睡、几点睡/起、今晚熬夜/顺延起床/通宵欠觉/补睡状态。"""
         now = now or datetime.now()
         disabled = {
-            "enabled": False, "asleep": False, "bedtime": "", "wake": "",
-            "stay_up": False, "wake_ts": 0.0,
+            "enabled": False,
+            "asleep": False,
+            "bedtime": "",
+            "base_bedtime": "",
+            "wake": "",
+            "stay_up": False,
+            "stay_up_minutes": 0,
+            "wake_shift_minutes": 0,
+            "oversleep": False,
+            "groggy": False,
+            "all_nighter": False,
+            "all_nighter_debt": False,
+            "catch_up_nap": False,
+            "in_base_sleep": False,
+            "wake_ts": 0.0,
         }
         if not self._cfg("sleep.enabled", True):
             return disabled
@@ -6812,47 +7253,157 @@ class EmotionCore(Star):
         if not bedtime or not wake:
             return disabled
 
+        self._sync_sleep_state(now)
         st = self.state
-        cur = now.hour * 60 + now.minute
+        now_ts = now.timestamp()
         b0 = bedtime[0] * 60 + bedtime[1]
         w = wake[0] * 60 + wake[1]
-        # 归属"哪一晚"：与 _logical_day 保持同一口径（起床前仍算上一轮，
-        # 否则 00:10 会用今天刚掷的熬夜结果，把昨晚已经睡下的人判成醒着）。
+        sleep_len = (w - b0) % 1440
+        base_bed_str = f"{b0 // 60:02d}:{b0 % 60:02d}"
+        base_wake_str = f"{w // 60:02d}:{w % 60:02d}"
+
+        # 归属"哪一晚"：与 _logical_day 保持同一口径（顺延/通宵均按真正睡醒后才切新一天）
         plan_day = self._logical_day(now)
+        bed_dt, wake_dt = self._cycle_window_dts(plan_day, b0, w)
+        in_base_sleep = sleep_len > 0 and (bed_dt.timestamp() <= now_ts < wake_dt.timestamp())
+
+        # 优先判定：通宵后正在补睡（不论白天黑夜）
+        if self._is_in_catch_up_nap(now):
+            nap_start_dt = datetime.fromtimestamp(float(st.get("sleep_nap_start_ts", now_ts)))
+            nap_until_ts = float(st.get("sleep_nap_until_ts", now_ts))
+            nap_until_dt = datetime.fromtimestamp(nap_until_ts)
+            return {
+                "enabled": True,
+                "asleep": True,
+                "bedtime": f"{nap_start_dt:%H:%M}",
+                "base_bedtime": base_bed_str,
+                "wake": f"{nap_until_dt:%H:%M}",
+                "stay_up": True,
+                "stay_up_minutes": 0,
+                "wake_shift_minutes": 0,
+                "oversleep": False,
+                "groggy": False,
+                "all_nighter": True,
+                "all_nighter_debt": True,
+                "catch_up_nap": True,
+                "in_base_sleep": in_base_sleep,
+                "wake_ts": nap_until_ts,
+            }
+
         if st.get("sleep_day") != plan_day:
+            prev_day = str(st.get("sleep_day") or "")
+            # 若上一周期是「普通熬夜（未顺延起床、非通宵）」，醒后 2 小时带没睡饱/小起床气
+            if (
+                prev_day
+                and bool(st.get("sleep_stay_up"))
+                and not bool(st.get("sleep_all_nighter"))
+                and int(st.get("sleep_wake_shift_minutes", 0) or 0) <= 0
+                and sleep_len > 0
+            ):
+                try:
+                    prev_shift = int(st.get("sleep_stay_up_minutes", 0) or 0)
+                    _, prev_wake_dt = self._cycle_window_dts(prev_day, b0, w)
+                    gr_start = prev_wake_dt.timestamp()
+                    gr_until = (prev_wake_dt + timedelta(hours=2)).timestamp()
+                    if gr_start <= now_ts < gr_until:
+                        pb = (b0 + prev_shift) % 1440
+                        st["sleep_groggy_start_ts"] = gr_start
+                        st["sleep_groggy_until_ts"] = gr_until
+                        st["sleep_groggy_bedtime"] = f"{pb // 60:02d}:{pb % 60:02d}"
+                        st["sleep_groggy_wake"] = base_wake_str
+                except Exception:
+                    pass
+
             st["sleep_day"] = plan_day
-            chance = min(
-                1.0, max(0.0, float(self._cfg("sleep.stay_up_chance", 0.2)))
+            chance = self._clamp_scale(
+                self._cfg("sleep.stay_up_chance", 0.2), 0.0, 1.0, 0.2
             )
-            st["sleep_stay_up"] = random.random() < chance
-        stay_up = bool(st.get("sleep_stay_up"))
+            stay_up_roll = sleep_len > 0 and (random.random() < chance)
+            st["sleep_stay_up"] = stay_up_roll
+            if stay_up_roll:
+                shift_roll, wake_shift_roll, all_nighter_roll = self._roll_stay_up_plan(sleep_len)
+                st["sleep_all_nighter"] = all_nighter_roll
+                st["sleep_stay_up_minutes"] = shift_roll
+                st["sleep_wake_shift_minutes"] = wake_shift_roll
+                self._init_stay_up_windows(
+                    plan_day, b0, w, shift_roll, wake_shift_roll, all_nighter_roll
+                )
+            else:
+                st["sleep_all_nighter"] = False
+                st["sleep_stay_up_minutes"] = 0
+                st["sleep_wake_shift_minutes"] = 0
 
-        b = b0
-        if stay_up:
-            shift = max(0, int(float(self._cfg("sleep.stay_up_hours", 2.0)) * 60))
-            b = (b0 + shift) % 1440
-            # 熬夜把整段睡眠挤没了就按原时间睡（避免 bedtime+wake 配出 20 小时睡眠）
-            if (w - b) % 1440 < 60:
-                b = b0
-                stay_up = False
-        if b == w:
+        stay_up = bool(st.get("sleep_stay_up")) and sleep_len > 0
+        all_nighter = bool(st.get("sleep_all_nighter")) and stay_up
+        shift = int(st.get("sleep_stay_up_minutes", 0) or 0)
+        wake_shift = int(st.get("sleep_wake_shift_minutes", 0) or 0)
+        # 兼容旧版本 mid-cycle 升级：补掷一次计划并同步写入窗口时间戳
+        if stay_up and not all_nighter and shift <= 0:
+            shift, wake_shift, all_nighter = self._roll_stay_up_plan(sleep_len)
+            st["sleep_all_nighter"] = all_nighter
+            st["sleep_stay_up_minutes"] = shift
+            st["sleep_wake_shift_minutes"] = wake_shift
+            self._init_stay_up_windows(plan_day, b0, w, shift, wake_shift, all_nighter)
+        elif stay_up and not all_nighter and shift > 0 and sleep_len - shift < 120:
+            # 用户中途改窄睡眠窗口导致原推迟点距起床不足 2h → 自然转为通宵并补齐通宵窗口
+            all_nighter = True
+            shift = 0
+            wake_shift = 0
+            st["sleep_all_nighter"] = True
+            st["sleep_stay_up_minutes"] = 0
+            st["sleep_wake_shift_minutes"] = 0
+            self._init_stay_up_windows(plan_day, b0, w, 0, 0, True)
+
+        all_nighter_debt = self._is_in_all_nighter_debt(now)
+        groggy = (
+            float(st.get("sleep_groggy_start_ts", 0.0) or 0.0)
+            <= now_ts
+            < float(st.get("sleep_groggy_until_ts", 0.0) or 0.0)
+        )
+
+        # 用绝对时间戳区间判断本周期是否睡着，避免顺延起床把次日早上的时钟段误判到当天早上
+        if all_nighter:
+            b = b0
+            w_eff = w
             asleep = False
-        elif b < w:
-            asleep = b <= cur < w
+            stay_up = True
+            shift = 0
+            wake_shift = 0
+            actual_wake_ts = wake_dt.timestamp()
         else:
-            asleep = cur >= b or cur < w
+            b = (b0 + shift) % 1440 if (stay_up and shift > 0) else b0
+            w_eff = (w + wake_shift) % 1440 if (stay_up and wake_shift > 0) else w
+            if not (stay_up and shift > 0):
+                stay_up = False
+                shift = 0
+                wake_shift = 0
+            actual_bed_ts = (bed_dt + timedelta(minutes=shift)).timestamp()
+            actual_wake_ts = (wake_dt + timedelta(minutes=wake_shift)).timestamp()
+            asleep = sleep_len > 0 and (actual_bed_ts <= now_ts < actual_wake_ts)
 
-        # 下一次起床时间（用于"还能睡多久"）
-        wake_dt = now.replace(hour=w // 60, minute=w % 60, second=0, microsecond=0)
-        if wake_dt <= now:
-            wake_dt += timedelta(days=1)
+        if actual_wake_ts <= now_ts:
+            next_wake_dt = now.replace(hour=w_eff // 60, minute=w_eff % 60, second=0, microsecond=0)
+            if next_wake_dt <= now:
+                next_wake_dt += timedelta(days=1)
+            wake_ts = next_wake_dt.timestamp()
+        else:
+            wake_ts = actual_wake_ts
         return {
             "enabled": True,
             "asleep": asleep,
             "bedtime": f"{b // 60:02d}:{b % 60:02d}",
-            "wake": f"{w // 60:02d}:{w % 60:02d}",
+            "base_bedtime": base_bed_str,
+            "wake": f"{w_eff // 60:02d}:{w_eff % 60:02d}",
             "stay_up": stay_up,
-            "wake_ts": wake_dt.timestamp(),
+            "stay_up_minutes": int(shift),
+            "wake_shift_minutes": int(wake_shift),
+            "oversleep": bool(wake_shift > 0 and asleep),
+            "groggy": bool(groggy and not asleep),
+            "all_nighter": all_nighter,
+            "all_nighter_debt": all_nighter_debt,
+            "catch_up_nap": False,
+            "in_base_sleep": in_base_sleep,
+            "wake_ts": wake_ts,
         }
 
     def _woken_night_state(self, now: datetime | None = None) -> dict:
@@ -6905,10 +7456,65 @@ class EmotionCore(Star):
             return ""
         now = now or datetime.now()
         info = self._sleep_info(now)
-        if not info.get("asleep"):
-            return ""
         d = self.state["drives"]
         fatigue = int(float(d.get("fatigue", 0)))
+        if not info.get("asleep"):
+            # 1) 通宵天亮后强撑（已过平时起床时间，仍在通宵欠觉中、尚未补睡）
+            an_wake_ts = float(self.state.get("sleep_an_wake_ts", 0.0) or 0.0)
+            if info.get("all_nighter_debt") and an_wake_ts > 0 and now.timestamp() >= an_wake_ts:
+                lines = [
+                    "## 你昨晚通宵了（强撑着没睡）",
+                    f"现在是 {now:%H:%M}，已经过了平时起床点，但你一宿没睡到现在都还没补觉。",
+                ]
+                if fatigue >= 85:
+                    lines.append(
+                        f"整个人困得发飘、脑子转得慢、话少发懒（疲惫 {fatigue}），随时准备倒头补睡。"
+                    )
+                else:
+                    lines.append(
+                        f"明显带着熬了一整夜的疲惫感和困倦（疲惫 {fatigue}），说话懒散一点、可以念叨困或打哈欠，别装作刚睡饱。"
+                    )
+                return "\n".join(lines)
+            # 2) 普通熬夜刚按点醒来（醒后 2 小时内）：带着没睡饱的感觉或小起床气
+            if info.get("groggy"):
+                gb = str(self.state.get("sleep_groggy_bedtime") or info.get("base_bedtime") or "")
+                gw = str(self.state.get("sleep_groggy_wake") or info.get("wake") or "")
+                if for_owner:
+                    return (
+                        "## 你昨晚熬夜没睡饱（刚醒不久）\n"
+                        f"昨晚熬夜到 {gb} 才睡，今天按点 {gw} 起来还没睡够，带着点没睡饱的小起床气和迷糊懒散感："
+                        "可以顺嘴抱怨困、撒个娇，但不是真生气。"
+                    )
+                return (
+                    "## 你昨晚熬夜没睡饱（刚醒不久）\n"
+                    "昨晚熬夜睡太晚，今天刚起床还没睡够，带着点没睡饱的困倦和小起床气，回复简短一点、别太精神。"
+                )
+            # 3) 深夜还没睡（正在熬夜或通宵）：给一句轻量状态提示，白天返回空串（0 消耗）
+            if not info.get("in_base_sleep"):
+                return ""
+            if info.get("all_nighter") or info.get("all_nighter_debt"):
+                lines = [
+                    "## 你今晚通宵没睡",
+                    f"现在是 {now:%H:%M}，你平时 {info['base_bedtime']} 就睡了，今晚彻底睡不着干脆通宵了。",
+                ]
+                if fatigue >= 95:
+                    lines.append(
+                        f"已经困得眼睛快睁不开了（疲惫 {fatigue}），但硬撑着还没到天亮，强打精神回话、说话很短发飘。"
+                    )
+                elif fatigue >= 60:
+                    lines.append(
+                        f"熬到现在已经挺困了（疲惫 {fatigue}），说话带点深夜懒散和微困感，别装作刚睡醒或精力充沛。"
+                    )
+                else:
+                    lines.append("说话可以自然带点深夜还醒着的清醒与慵懒感，别假装刚睡醒。")
+                return "\n".join(lines)
+            if info.get("stay_up"):
+                return (
+                    "## 你今晚在熬夜（还没睡）\n"
+                    f"现在是 {now:%H:%M}，你平时 {info['base_bedtime']} 就睡了，今晚熬夜，打算拖到 {info['bedtime']} 左右再睡。\n"
+                    "现在还没睡着，说话可以自然带点熬夜还没睡意的感觉，不用假装已经睡醒。"
+                )
+            return ""
         stress = int(float(d.get("stress", 0)))
         attachment = int(float(d.get("attachment", 0)))
         intimacy = int(float(d.get("intimacy", 0)))
@@ -6923,13 +7529,20 @@ class EmotionCore(Star):
             f"{left_min // 60} 小时 {left_min % 60} 分"
             if left_min >= 60 else f"{left_min} 分钟"
         )
-        lines = [
-            "## 你正在睡觉（被消息吵醒）",
-            f"现在是 {now:%H:%M}，你 {info['bedtime']} 就睡了，"
-            f"离 {info['wake']} 起床还有 {left}。",
-        ]
-        if info.get("stay_up"):
-            lines.append("你今晚熬夜了，本来就睡得晚，现在更困。")
+        if info.get("catch_up_nap"):
+            lines = [
+                "## 你正在补睡（被消息吵醒）",
+                f"现在是 {now:%H:%M}，你通宵熬不住了，刚才倒头补睡，打算睡到 {info['wake']}（离醒来还有 {left}）。",
+                "你通宵完困得不行，说话很短、迷迷糊糊，可以抱怨太困了想继续睡。",
+            ]
+        else:
+            lines = [
+                "## 你正在睡觉（被消息吵醒）",
+                f"现在是 {now:%H:%M}，你 {info['bedtime']} 就睡了，"
+                f"离 {info['wake']} 起床还有 {left}。",
+            ]
+            if info.get("stay_up"):
+                lines.append(f"你今晚熬夜到 {info['bedtime']} 才睡，本来就睡得晚，现在更困。")
         if fatigue >= 70:
             lines.append(
                 f"你困得不行（疲惫 {fatigue}）：回得很短、有点迷糊，句子可以不完整。"
@@ -7324,6 +7937,19 @@ class EmotionCore(Star):
         return special_days_mod.build_injection_line(
             snap, fish_bday_wished=wished, now_dt=now
         )
+
+    def _special_day_query_injection(
+        self, text: str, now_dt: datetime | None = None
+    ) -> str:
+        """鱼主主动问起相识天数/生日/纪念日时按需注入事实（平时不注入）。"""
+        if special_days_mod is None:
+            return ""
+        if not special_days_mod.is_asking_special_days(text):
+            return ""
+        snap = self._special_days_snapshot(now_dt or datetime.now())
+        if not snap.get("has_any"):
+            return ""
+        return special_days_mod.build_query_injection(snap)
 
     def _sync_special_day_mood(self, now_dt: datetime | None = None) -> list[str]:
         """当天首次进入特别的日子时，轻推一次情绪（每天每项最多一次）。"""
@@ -7967,6 +8593,13 @@ class EmotionCore(Star):
                 "bedtime": str(sleep.get("bedtime") or ""),
                 "wake": str(sleep.get("wake") or ""),
                 "stay_up": bool(sleep.get("stay_up")),
+                "stay_up_minutes": int(sleep.get("stay_up_minutes") or 0),
+                "wake_shift_minutes": int(sleep.get("wake_shift_minutes") or 0),
+                "oversleep": bool(sleep.get("oversleep")),
+                "groggy": bool(sleep.get("groggy")),
+                "all_nighter": bool(sleep.get("all_nighter")),
+                "all_nighter_debt": bool(sleep.get("all_nighter_debt")),
+                "catch_up_nap": bool(sleep.get("catch_up_nap")),
                 "wake_ts": float(sleep.get("wake_ts") or 0.0),
             },
             "recent_rewards": _fresh_list(st.get("recent_rewards")),
@@ -8240,6 +8873,31 @@ class EmotionCore(Star):
             yield event.plain_result("成人模式已关闭，同意已撤销；欲会慢慢回落。")
             return
 
+        if arg in ("done", "finish", "结束", "完事", "贤者"):
+            if not self._adult_enabled():
+                yield event.plain_result("成人向总开关未打开，无需收束。")
+                return
+            if not bool(self._cfg("desire.enabled", True)) or not st.get("desire_awakened"):
+                yield event.plain_result("隐藏的欲尚未解锁，无需收束。")
+                return
+            self._expire_sage()
+            if self._sage_active():
+                left = float(st.get("sage_until", 0.0) or 0.0) - time.time()
+                yield event.plain_result(
+                    f"已经在贤者期里了（还剩 {self._left_text(left)}）。"
+                )
+                return
+            self._apply_sage("手动收束")
+            self._save_state()
+            if self._sage_active():
+                left = float(st.get("sage_until", 0.0) or 0.0) - time.time()
+                yield event.plain_result(
+                    f"已收束本轮亲密场景：欲已回落并进入贤者期（约 {self._left_text(left)}）。"
+                )
+            else:
+                yield event.plain_result("已收束本轮亲密场景：欲已回落。")
+            return
+
         if arg in ("status", "状态"):
             # 不应期可能刚好到点：先清掉过期标记，免得显示成「已暂停」
             self._expire_sage()
@@ -8317,7 +8975,7 @@ class EmotionCore(Star):
             yield event.plain_result("\n".join(lines))
             return
 
-        yield event.plain_result("用法：/adult on | off | status")
+        yield event.plain_result("用法：/adult on | off | done | status")
 
     @filter.command("心")
     async def emotion_cmd(self, event: AstrMessageEvent):
@@ -8362,6 +9020,7 @@ class EmotionCore(Star):
                     "config_036_migrated",
                     "desire_refresh_30_migrated",
                     "proactive_schedule_migrated",
+                    "sage_defaults_045_migrated",
                 )
             }
             self.state = new_state()

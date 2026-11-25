@@ -375,9 +375,15 @@
         : (cfg.schedule_mode === "daily_guarantee" ? "睡前兜底" : "全天随机")],
       ["刚聊过不打扰", `${cfg.min_idle_minutes}min`],
       ["作息", d.sleep?.enabled
-        ? (d.sleep.asleep
-          ? `睡着（${d.sleep.wake} 起）`
-          : `${d.sleep.bedtime}-${d.sleep.wake}${d.sleep.stay_up ? " 熬夜" : ""}`)
+        ? (d.sleep.catch_up_nap
+          ? `补睡中（${d.sleep.wake} 醒）`
+          : (d.sleep.asleep
+            ? `睡着（${d.sleep.wake} 起${d.sleep.oversleep ? " · 顺延" : (d.sleep.stay_up ? " · 熬夜" : "")}）`
+            : (d.sleep.all_nighter_debt
+              ? `通宵欠觉中（疲惫 ${Math.round(d.drives?.fatigue || 0)}/95 补睡）`
+              : (d.sleep.all_nighter
+                ? `今晚通宵（平时 ${d.sleep.bedtime}-${d.sleep.wake}）`
+                : `${d.sleep.bedtime}-${d.sleep.wake}${d.sleep.groggy ? " 没睡饱" : (d.sleep.stay_up ? " 熬夜" : "")}`))))
         : "关"],
       ["群友模式", cfg.group_everyone
         ? `开 主×${cfg.group_owner_scale ?? 1} 群×${cfg.group_scale ?? 0.5} 负 群${cfg.group_negative_scale ?? 0.35}/主${cfg.group_owner_negative_scale ?? 0.5}`
@@ -410,7 +416,9 @@
         ? "她在回避：主动说话被冻结，但「已读不回」已关闭，你说话她照常回。"
         : `她在回避：主动说话被冻结；私聊 ${d.silent_streak || 0}/${cap} 条（这一条回 ${pct}%）、群聊 ${d.silent_streak_group || 0}/${cap} 条不回。`;
     } else if (d.sleep?.asleep) {
-      readiness = `她睡着了（${d.sleep.bedtime}-${d.sleep.wake}${d.sleep.stay_up ? "，今晚熬夜" : ""}），${d.sleep.wake} 之后才可能开口。`;
+      readiness = d.sleep.catch_up_nap
+        ? `她通宵熬不住了，正在补睡（预计 ${d.sleep.wake} 醒），醒来后才可能开口。`
+        : `她睡着了（${d.sleep.bedtime}-${d.sleep.wake}${d.sleep.oversleep ? "，顺延起床" : (d.sleep.stay_up ? "，今晚熬夜" : "")}），${d.sleep.wake} 之后才可能开口。`;
     } else if (!proactiveOn) {
       readiness = "主动说话已关闭；你说话她会回，但不会主动开口。";
     } else if (outOfWindow) {

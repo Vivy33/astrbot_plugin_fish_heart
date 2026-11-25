@@ -14,9 +14,9 @@ desc: |
 
   关系满格够久，会解锁隐藏的「欲」。成人层默认关闭，只对私聊鱼主、且需要明确同意；打开的那一轮只注入一次写法约束，之后不再重复。场景结束会进入一段冷却期，她会安静下来，不再主动往前推，到点自动恢复。群聊也能用：群友模式下所有人都能影响她，正负强度分开调；管理命令仍只对白名单里的鱼主开放。
 
-  命令：/心 status、calm、reset、tick、off、on、umo；/adult on、off、status
+  命令：/心 status、calm、reset、tick、off、on、umo；/adult on、off、done、status
   数据目录：data/plugin_data/astrbot_plugin_fish_heart/
-version: 0.4.4
+version: 0.4.5
 author: Vivy33
 repo: "https://github.com/Vivy33/astrbot_plugin_fish_heart"
 astrbot_version: ">=4.24.2"

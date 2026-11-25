@@ -65,6 +65,19 @@ _FISH_BDAY_NEG_RE = re.compile(
     r"(?:不是你生日|还没到你生日|忘了你生日|没过生日|别过生日|不是生日)"
 )
 
+# 鱼主主动问起「相识第几天 / 认识多久 / 生日 / 纪念日」时按需注入事实，
+# 平时不在预热窗口内仍保持零 token 消耗。
+_ASK_SPECIAL_DAY_RE = re.compile(
+    r"(?:"
+    r"(?:相识|认识|在一起|相遇|陪伴)[^，。！？!?\n]{0,8}(?:第几天|几天|多少天|多久|哪天|几号|什么时候|几月)"
+    r"|(?:哪天|几号|什么时候)[^，。！？!?\n]{0,6}(?:相识|认识|在一起|相遇)"
+    r"|(?:我|你|咱|我们|鱼)(?:的)?生日"
+    r"|(?:哪天|几号|什么时候)[^，。！？!?\n]{0,4}生日"
+    r"|生日[^，。！？!?\n]{0,6}(?:哪天|几号|什么时候|几月|还有|多久|几天|记得|知道)"
+    r"|纪念日|特别的日子|多少周年|几周年|相识\s*\d+\s*天|(?:百天|100天|520天)"
+    r")"
+)
+
 
 def parse_date_spec(raw: Any) -> dict[str, Any] | None:
     """解析单个日期字符串；支持 YYYY-MM-DD 与 MM-DD（及常见中文/斜杠变体）。
@@ -476,6 +489,54 @@ def build_injection_line(
     if not notes:
         return "", ""
     return ",".join(sig_parts), "特别的日子：" + "；".join(notes) + "。"
+
+
+def is_asking_special_days(text: str) -> bool:
+    """判断这句话是否在问起相识天数、生日或纪念日。"""
+    s = str(text or "").strip()
+    if not s:
+        return False
+    return bool(_ASK_SPECIAL_DAY_RE.search(s))
+
+
+def build_query_injection(snap: dict[str, Any]) -> str:
+    """他主动问起相识天数/生日/纪念日时，按需拼一段紧凑事实供模型自然作答。"""
+    if not snap or not snap.get("has_any"):
+        return ""
+    lines: list[str] = [
+        "## 你记得的特别日子（他刚好问起，用你自己的语气自然回答即可，不要机械报清单）"
+    ]
+    today_str = str(snap.get("today_str") or "")
+    met_days = int(snap.get("met_days") or 0)
+    met_date = str(snap.get("met_date") or "")
+    if today_str:
+        lines.append(f"- 今天是 {today_str}")
+    if met_days > 0:
+        since = f"从 {met_date} " if met_date else ""
+        lines.append(f"- 你们{since}相识至今：今天是相识第 {met_days} 天")
+    elif met_date:
+        lines.append(f"- 你们的相识纪念日：{met_date}")
+
+    items = snap.get("items") or []
+    upcoming: list[str] = []
+    for it in items:
+        kind = str(it.get("kind") or "")
+        name = str(it.get("name") or "")
+        d = str(it.get("date") or "")
+        left = int(it.get("days_left") or 0)
+        when = "就是今天" if left == 0 else f"还有 {left} 天"
+        if kind == "owner_birthday":
+            lines.append(f"- 他的生日：{d}（{when}）")
+        elif kind == "fish_birthday":
+            hint = "，若他没问起别主动提" if left <= 3 else ""
+            lines.append(f"- 你的生日：{d}（{when}{hint}）")
+        elif kind in ("met_anniversary", "met_milestone", "custom"):
+            if len(upcoming) < 3:
+                nxt = str(it.get("next_date") or d)
+                upcoming.append(f"{name}（{nxt}，{when}）")
+    if upcoming:
+        lines.append("- 接下来：" + "；".join(upcoming))
+    return "\n".join(lines) if len(lines) > 1 else ""
 
 
 def build_proactive_wish_direction(
