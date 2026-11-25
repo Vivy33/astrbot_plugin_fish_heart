@@ -205,6 +205,25 @@
         "default": true,
         "invisible": true,
         "hint": "默认开启，把多句主动消息按句末标点拆成 2–4 条间隔发出，更像人在打字；关掉后整段一次发出。"
+      },
+      "memory_bridge": {
+        "type": "bool",
+        "description": "主动消息读取/写回记忆插件",
+        "default": false,
+        "hint": "开启后，生成前按白名单调 fish_heart_recall()，发送成功后调 fish_heart_remember()；默认关闭，不改变现有行为。"
+      },
+      "memory_plugins": {
+        "type": "list",
+        "description": "允许调用的记忆插件名",
+        "default": [],
+        "hint": "只调用这里列出的插件；例如 [\"astrbot_plugin_livingmemory\"]。插件需要实现 fish_heart_recall / fish_heart_remember，缺哪个就跳过哪个。"
+      },
+      "memory_timeout": {
+        "type": "float",
+        "description": "记忆桥接超时（秒）",
+        "default": 2.5,
+        "invisible": true,
+        "hint": "0.5–10 秒；防止外部检索卡住心跳和主动消息。"
       }
     }
   },

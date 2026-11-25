@@ -5517,6 +5517,8 @@ class EmotionCore(Star):
                         self._push_recent("bot", text[:200])
                         await self._append_history(wish_umo, text)
                         self._save_state()
+                        # 先落盘再调外部记忆插件：对方超时或异常不该拖住状态写入。
+                        await self._remember_proactive(wish_umo, text)
                         logger.info(
                             "[鱼的心] 特别的日子专属祝福已发送（%s）：%s",
                             special_item.get("name", ""), text[:40],
@@ -5612,6 +5614,8 @@ class EmotionCore(Star):
                 # 写回对话历史：否则你说"你刚才不是问了吗"，她一脸茫然
                 await self._append_history(umo, text)
                 self._save_state()
+                # 先落盘再调外部记忆插件：对方超时或异常不该拖住状态写入。
+                await self._remember_proactive(umo, text)
                 logger.info("[鱼的心] 主动说话已发送（%s）：%s",
                             KIND_CN.get(kind, kind), text[:40])
         except Exception as e:
@@ -6323,6 +6327,147 @@ class EmotionCore(Star):
             return "没什么事，就是想跟你说句话"
         return "想到你了"
 
+    # ---------------- 主动消息记忆桥接（可选） ----------------
+
+    def _memory_bridge_names(self) -> list[str]:
+        """返回配置白名单里的记忆插件名；总开关关闭时为空。"""
+        if not bool(self._cfg("proactive.memory_bridge", False)):
+            return []
+        raw = self._cfg("proactive.memory_plugins", [])
+        if isinstance(raw, str):
+            items = raw.replace("，", ",").split(",")
+        elif isinstance(raw, (list, tuple, set)):
+            items = list(raw)
+        else:
+            items = []
+        names: list[str] = []
+        for item in items:
+            if item is None:
+                continue
+            name = str(item).strip()
+            if name and name != PLUGIN_NAME and name not in names:
+                names.append(name)
+        return names
+
+    def _memory_bridge_plugin(self, name: str):
+        """按插件名找已启用的实例；优先走公开 API，老版本再退回 star_map。"""
+        getter = getattr(self.context, "get_registered_star", None)
+        if callable(getter):
+            try:
+                meta = getter(name)
+                if meta is not None:
+                    # 查到了就不再往 star_map 兜底：未激活就是不可用，
+                    # 否则可能拿到一个没跑起来的实例。
+                    if not getattr(meta, "activated", True):
+                        return None
+                    plugin = getattr(meta, "star_cls", None)
+                    if plugin is not None:
+                        return plugin
+            except Exception as e:
+                self._dbg("主动记忆桥接找插件失败（公开 API）: %s", e)
+        try:
+            from astrbot.core.star.star import star_map
+        except Exception:
+            return None
+        for meta in star_map.values():
+            if getattr(meta, "name", "") == name and getattr(meta, "activated", True):
+                return getattr(meta, "star_cls", None)
+        return None
+
+    async def _call_memory_bridge(self, plugin, method_name: str, *args, **kwargs):
+        """同步/异步都能调；异步加超时，任何异常只降级不阻塞主动消息。"""
+        fn = getattr(plugin, method_name, None)
+        if not callable(fn):
+            return None
+        try:
+            timeout = float(self._cfg("proactive.memory_timeout", 2.5))
+        except (TypeError, ValueError):
+            timeout = 2.5
+        timeout = max(0.5, min(10.0, timeout))
+        try:
+            result = fn(*args, **kwargs)
+            if inspect.isawaitable(result):
+                result = await asyncio.wait_for(result, timeout=timeout)
+            return result
+        except Exception as e:
+            self._dbg("主动记忆桥接 %s 失败: %s", method_name, e)
+            return None
+
+    def _memory_bridge_query(self, umo: str) -> str:
+        """用最近 3–5 条真实聊天拼查询词；绝不传主动消息的写作规则。"""
+        rows = self.state.get("group_tail" if self._is_group(umo) else "recent") or []
+        rows = [r for r in rows if isinstance(r, dict)]
+        if not rows:
+            return "我和他之间的事"
+        parts: list[str] = []
+        last_user = ""
+        for row in rows[-5:]:
+            text = str(row.get("t") or "").strip().replace("\n", " ")
+            if not text:
+                continue
+            if self._is_group(umo):
+                if row.get("r") == "her":
+                    who = "她"
+                elif row.get("r") in ("owner", "user"):
+                    who = "他"
+                    last_user = text
+                else:
+                    who = str(row.get("who") or "群友")
+            else:
+                if row.get("r") == "user":
+                    who = "他"
+                    last_user = text
+                else:
+                    who = "她"
+            parts.append(f"{who}：{text[:60]}")
+        query = "；".join(parts).strip()
+        if len(last_user) < 6:
+            query = f"{query}；我和他之间的事".strip("；")
+        return (query or "我和他之间的事")[:200]
+
+    async def _proactive_memory_block(self, umo: str, kind: str) -> str:
+        """按白名单调一次 fish_heart_recall；草稿重写不重查。"""
+        if kind == KIND_ANGRY:
+            return ""
+        names = self._memory_bridge_names()
+        if not names:
+            return ""
+        query = self._memory_bridge_query(umo)
+        if not query:
+            return ""
+        for name in names:
+            plugin = self._memory_bridge_plugin(name)
+            if plugin is None:
+                continue
+            result = await self._call_memory_bridge(
+                plugin, "fish_heart_recall", umo, query, 5
+            )
+            if not isinstance(result, str) or not result.strip():
+                continue
+            text = result.strip()[:800]
+            return (
+                "## 过往长期记忆（背景，不是最近对话）\n"
+                + text
+                + "\n以上是过往长期记忆，只作背景；近况和时间一律以本次「最近对话」记录为准，"
+                "不要当成刚刚发生的事。"
+            )
+        return ""
+
+    async def _remember_proactive(self, umo: str, text: str) -> None:
+        """发送成功且写回对话历史后，按白名单把最终那句写回记忆插件。"""
+        names = self._memory_bridge_names()
+        if not names or not text:
+            return
+        for name in names:
+            plugin = self._memory_bridge_plugin(name)
+            if plugin is None:
+                continue
+            result = await self._call_memory_bridge(
+                plugin, "fish_heart_remember", umo, text, time.time()
+            )
+            if bool(result):
+                return
+
     async def _gen_proactive_text(
         self,
         umo: str,
@@ -6355,6 +6500,11 @@ class EmotionCore(Star):
         desire_hint = self._desire_injection(umo, proactive=True, commit=False)
         if desire_hint:
             blocks.append(desire_hint)
+
+        # 可选：从白名单记忆插件取一段长期记忆做背景；生气时不注入，避免冲淡情绪。
+        memory_block = await self._proactive_memory_block(umo, kind)
+        if memory_block:
+            blocks.append(memory_block)
 
         st = self.state
         now = datetime.now().astimezone()
