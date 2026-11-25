@@ -1458,6 +1458,10 @@ def new_state() -> dict:
         "sleep_an_max_ts": 0.0,
         "sleep_nap_start_ts": 0.0,
         "sleep_nap_until_ts": 0.0,
+        "sleep_last_nap_wake_ts": 0.0,
+        "sleep_insomnia": False,
+        "sleep_insomnia_reason": "",
+        "sleep_insomnia_checked_day": "",
         "last_woken_ts": 0.0,
         # 今夜被吵醒次数（按作息周期自动清零）：区分鱼主与外人/群友，避免迁怒鱼主
         "woken_night": {
@@ -4732,9 +4736,11 @@ class EmotionCore(Star):
             sleep_block = self._sleep_injection(now_dt, for_owner=woken_is_owner)
             if sleep_block:
                 self._attach_injection(request, sleep_block)
-            # 若本轮对话把疲惫推到了 95+（且已过通宵起床缓冲期），回完本句后进入补睡，
-            # 避免同一句里前一秒还醒着聊、后一秒就被判成「补睡中被吵醒」。
-            self._maybe_start_catch_up_nap(now_dt)
+            # 若本轮对话（仅限鱼主）把情绪型失眠哄好了（且距起床 ≥2h），回完本句后安心睡着；
+            # 否则若把疲惫推到了 95+（且已过通宵起床缓冲期），回完本句后进入补睡，
+            # 避免同一句里前一秒还醒着聊、后一秒就被判成「睡着被吵醒」。
+            if not (woken_is_owner and self._maybe_soothe_insomnia(now_dt, events)):
+                self._maybe_start_catch_up_nap(now_dt)
 
             # 鱼主主动问起相识第几天 / 生日 / 纪念日时，按需补一段轻量事实（平时 0 消耗，不受心境节流影响）
             if woken_is_owner and self._cfg("inject.enabled", True):
@@ -7087,6 +7093,158 @@ class EmotionCore(Star):
         st["sleep_an_max_ts"] = 0.0
         st["sleep_nap_start_ts"] = 0.0
         st["sleep_nap_until_ts"] = 0.0
+        st["sleep_insomnia"] = False
+        st["sleep_insomnia_reason"] = ""
+
+    def _detect_insomnia_trigger(self, now_ts: float) -> tuple[str, float]:
+        """检测当前是否存在合理的失眠诱因，返回 (诱因类型, 触发概率)；平静日常返回 ('', 0.0)。
+
+        注意：不可在此调用 `_sleep_info()` 或 `_is_desire_unsatisfied()`，避免递归。
+        """
+        st = self.state
+        drives = st.get("drives") or {}
+        blame = float(st.get("blame_pressure", 0.0) or 0.0)
+        stress = float(drives.get("stress", 0.0) or 0.0)
+        refl = float(drives.get("reflection", 0.0) or 0.0)
+        exp = float(st.get("expectation", 0.0) or 0.0)
+        candidates: list[tuple[str, float]] = []
+
+        # 1) 闹别扭 / 心结未解
+        if blame >= 55.0:
+            candidates.append(("blame", 0.45))
+        elif blame >= 25.0 or bool(st.get("mind_knot")):
+            candidates.append(("blame", 0.28))
+
+        # 2) 高压 / 脑子反刍停不下来
+        if stress >= 50.0 and refl >= 65.0:
+            candidates.append(("stress", 0.38))
+        elif stress >= 50.0 or refl >= 65.0:
+            candidates.append(("stress", 0.30))
+
+        # 3) 等他回消息心里悬着
+        if exp >= EXP_ANXIOUS_AT and bool(st.get("awaiting_reply")):
+            candidates.append(("anxious", 0.25))
+
+        # 4) 刚补睡醒来不到 5 小时（生物钟错位，晚上睡不着）
+        last_nap_wake = float(st.get("sleep_last_nap_wake_ts", 0.0) or 0.0)
+        if last_nap_wake > 0 and 0.0 < (now_ts - last_nap_wake) < 5 * 3600:
+            candidates.append(("nap", 0.25))
+
+        # 5) 欲求不满且未进贤者期（直接读底层状态，不调 _is_desire_unsatisfied 避免递归）
+        if (
+            bool(self._cfg("desire.enabled", True))
+            and bool(st.get("desire_awakened"))
+            and bool(st.get("desire_unsatisfied"))
+            and not self._sage_active()
+            and not st.get("adult_paused")
+            and self._desire_bond_full()
+            and mode_of(blame) == MODE_CALM
+            and stress < 50.0
+            and float(drives.get("fatigue", 0.0) or 0.0) < 65.0
+        ):
+            candidates.append(("desire", 0.20))
+
+        if not candidates:
+            return "", 0.0
+        # 多条同时命中不叠加成 100%，取概率最高的主诱因
+        return max(candidates, key=lambda item: item[1])
+
+    def _maybe_soothe_insomnia(
+        self, now: datetime | None = None, events: list[str] | None = None
+    ) -> bool:
+        """情绪/期待/欲引起的失眠：若深夜被哄好安心且距正常起床 ≥2h，则解除失眠并安心入睡。"""
+        if not self._cfg("sleep.enabled", True):
+            return False
+        st = self.state
+        if not st.get("sleep_insomnia"):
+            return False
+        dt = now or datetime.now()
+        if not self._is_in_all_nighter_debt(dt) or self._is_in_catch_up_nap(dt):
+            return False
+        reason = str(st.get("sleep_insomnia_reason") or "")
+        if reason == "nap":
+            # 刚补睡醒来不困，属于生理错位，不是哄一下就能睡着的
+            return False
+        dt_ts = dt.timestamp()
+        an_start = float(st.get("sleep_an_start_ts", 0.0) or 0.0)
+        an_wake = float(st.get("sleep_an_wake_ts", 0.0) or 0.0)
+        if an_start <= 0 or an_wake <= an_start:
+            return False
+        # 必须仍在今晚正常睡眠窗内，且距离正常起床还有至少 2 小时
+        if dt_ts < an_start or (an_wake - dt_ts) < 2 * 3600:
+            return False
+
+        drives = st.get("drives") or {}
+        blame = float(st.get("blame_pressure", 0.0) or 0.0)
+        stress = float(drives.get("stress", 0.0) or 0.0)
+        refl = float(drives.get("reflection", 0.0) or 0.0)
+        exp = float(st.get("expectation", 0.0) or 0.0)
+        ev_set = set(events or ())
+
+        soothed = False
+        if reason == "blame":
+            soothed = blame < 25.0 and not st.get("mind_knot") and stress < 50.0
+        elif reason == "stress":
+            soothed = stress < 45.0 and refl < 60.0 and blame < 25.0
+        elif reason == "anxious":
+            soothed = (not st.get("awaiting_reply")) and exp < 40.0 and blame < 25.0
+        elif reason == "desire":
+            soothed = self._sage_active() or not st.get("desire_unsatisfied")
+        # 情绪/焦虑型失眠中，他来道了晚安且当下已平静不紧绷，同样算安心睡下
+        if (
+            not soothed
+            and reason in ("blame", "stress", "anxious")
+            and "goodnight" in ev_set
+            and blame < 25.0
+            and not st.get("mind_knot")
+            and stress < 50.0
+        ):
+            soothed = True
+        if not soothed:
+            return False
+
+        bedtime = parse_clock(str(self._cfg("sleep.bedtime", "23:30")))
+        wake = parse_clock(str(self._cfg("sleep.wake", "07:30")))
+        if not bedtime or not wake:
+            return False
+        b0 = bedtime[0] * 60 + bedtime[1]
+        w = wake[0] * 60 + wake[1]
+        sleep_len = (w - b0) % 1440
+        plan_day = str(st.get("sleep_an_day") or self._logical_day(dt))
+        elapsed_min = max(0, int((dt_ts - an_start) // 60))
+        # 按 5 分钟向下取整，确保 actual_bed_ts <= dt_ts，回完本句立即处于已睡状态
+        shift_min = (elapsed_min // 5) * 5
+        rem_min = sleep_len - shift_min
+        if rem_min < 120:
+            # 用户中途改窄作息窗口导致剩余已不足 2h，维持通宵避免下轮翻转
+            return False
+        wake_shift = 0
+        if 120 <= rem_min < 240:
+            max_extra = max(30, min(300, 1440 - sleep_len - 120))
+            target_lo = min(max(rem_min + 30, 300), rem_min + max_extra)
+            target_hi = min(max(target_lo, min(sleep_len, 420)), rem_min + max_extra)
+            lo_step = max(1, int(round((target_lo - rem_min) / 5.0)))
+            hi_step = max(lo_step, int(round((target_hi - rem_min) / 5.0)))
+            wake_shift = random.randint(lo_step, hi_step) * 5
+
+        self._clear_all_nighter_state()
+        st["sleep_day"] = plan_day
+        st["sleep_all_nighter"] = False
+        if shift_min > 0:
+            st["sleep_stay_up"] = True
+            st["sleep_stay_up_minutes"] = shift_min
+            st["sleep_wake_shift_minutes"] = wake_shift
+            if wake_shift > 0:
+                self._init_stay_up_windows(plan_day, b0, w, shift_min, wake_shift, False)
+        else:
+            st["sleep_stay_up"] = False
+            st["sleep_stay_up_minutes"] = 0
+            st["sleep_wake_shift_minutes"] = 0
+        self._dbg(
+            "失眠（%s）已被安抚缓解，转为正常睡眠（推迟 %d 分，顺延 %d 分）",
+            reason, shift_min, wake_shift,
+        )
+        return True
 
     def _init_stay_up_windows(
         self,
@@ -7152,6 +7310,10 @@ class EmotionCore(Star):
             if old_f > 30.0:
                 drives["fatigue"] = 30.0
                 self._note_event("catch_up_nap", {"fatigue": 30.0 - old_f}, 1.0)
+            an_max = float(st.get("sleep_an_max_ts", 0.0) or 0.0)
+            if an_max <= 0 or nap_until < an_max - 60.0:
+                # 仅白天/傍晚临时补睡记作生物钟错位基准，整夜补觉到明早起床点不算
+                st["sleep_last_nap_wake_ts"] = nap_until
             self._clear_all_nighter_state()
         else:
             # 2) 通宵状态生命周期维护
@@ -7242,6 +7404,8 @@ class EmotionCore(Star):
             "groggy": False,
             "all_nighter": False,
             "all_nighter_debt": False,
+            "insomnia": False,
+            "insomnia_reason": "",
             "catch_up_nap": False,
             "in_base_sleep": False,
             "wake_ts": 0.0,
@@ -7285,11 +7449,16 @@ class EmotionCore(Star):
                 "groggy": False,
                 "all_nighter": True,
                 "all_nighter_debt": True,
+                "insomnia": bool(st.get("sleep_insomnia")),
+                "insomnia_reason": str(st.get("sleep_insomnia_reason") or ""),
                 "catch_up_nap": True,
                 "in_base_sleep": in_base_sleep,
                 "wake_ts": nap_until_ts,
             }
 
+        chance = self._clamp_scale(
+            self._cfg("sleep.stay_up_chance", 0.2), 0.0, 1.0, 0.2
+        )
         if st.get("sleep_day") != plan_day:
             prev_day = str(st.get("sleep_day") or "")
             # 若上一周期是「普通熬夜（未顺延起床、非通宵）」，醒后 2 小时带没睡饱/小起床气
@@ -7315,9 +7484,8 @@ class EmotionCore(Star):
                     pass
 
             st["sleep_day"] = plan_day
-            chance = self._clamp_scale(
-                self._cfg("sleep.stay_up_chance", 0.2), 0.0, 1.0, 0.2
-            )
+            st["sleep_insomnia"] = False
+            st["sleep_insomnia_reason"] = ""
             stay_up_roll = sleep_len > 0 and (random.random() < chance)
             st["sleep_stay_up"] = stay_up_roll
             if stay_up_roll:
@@ -7354,7 +7522,37 @@ class EmotionCore(Star):
             st["sleep_wake_shift_minutes"] = 0
             self._init_stay_up_windows(plan_day, b0, w, 0, 0, True)
 
+        # 特殊条件触发「失眠」并入通宵：
+        # 本来要按点睡、已跨过平时入睡点、本周期尚未判过、且存在合理情绪/生理诱因时才判一次；
+        # stay_up_chance=0（严格按点睡）或日常平静无诱因时绝不触发。
+        if (
+            sleep_len > 0
+            and chance > 0
+            and not stay_up
+            and not all_nighter
+            and in_base_sleep
+            and (wake_dt.timestamp() - now_ts) >= 2 * 3600
+            and str(st.get("sleep_insomnia_checked_day") or "") != plan_day
+        ):
+            st["sleep_insomnia_checked_day"] = plan_day
+            ins_reason, ins_prob = self._detect_insomnia_trigger(now_ts)
+            if ins_reason and ins_prob > 0 and random.random() < ins_prob:
+                stay_up = True
+                all_nighter = True
+                shift = 0
+                wake_shift = 0
+                st["sleep_stay_up"] = True
+                st["sleep_all_nighter"] = True
+                st["sleep_stay_up_minutes"] = 0
+                st["sleep_wake_shift_minutes"] = 0
+                st["sleep_insomnia"] = True
+                st["sleep_insomnia_reason"] = ins_reason
+                self._init_stay_up_windows(plan_day, b0, w, 0, 0, True)
+                self._dbg("入睡时触发失眠（诱因=%s，概率=%.0f%%），并入通宵", ins_reason, ins_prob * 100)
+
         all_nighter_debt = self._is_in_all_nighter_debt(now)
+        insomnia = bool(st.get("sleep_insomnia")) and (all_nighter or all_nighter_debt)
+        insomnia_reason = str(st.get("sleep_insomnia_reason") or "") if insomnia else ""
         groggy = (
             float(st.get("sleep_groggy_start_ts", 0.0) or 0.0)
             <= now_ts
@@ -7401,6 +7599,8 @@ class EmotionCore(Star):
             "groggy": bool(groggy and not asleep),
             "all_nighter": all_nighter,
             "all_nighter_debt": all_nighter_debt,
+            "insomnia": insomnia,
+            "insomnia_reason": insomnia_reason,
             "catch_up_nap": False,
             "in_base_sleep": in_base_sleep,
             "wake_ts": wake_ts,
@@ -7462,10 +7662,16 @@ class EmotionCore(Star):
             # 1) 通宵天亮后强撑（已过平时起床时间，仍在通宵欠觉中、尚未补睡）
             an_wake_ts = float(self.state.get("sleep_an_wake_ts", 0.0) or 0.0)
             if info.get("all_nighter_debt") and an_wake_ts > 0 and now.timestamp() >= an_wake_ts:
-                lines = [
-                    "## 你昨晚通宵了（强撑着没睡）",
-                    f"现在是 {now:%H:%M}，已经过了平时起床点，但你一宿没睡到现在都还没补觉。",
-                ]
+                if info.get("insomnia"):
+                    lines = [
+                        "## 你昨晚失眠通宵了（强撑着没睡）",
+                        f"现在是 {now:%H:%M}，已经过了平时起床点，昨晚翻来覆去失眠一宿没睡，到现在都还没补觉。",
+                    ]
+                else:
+                    lines = [
+                        "## 你昨晚通宵了（强撑着没睡）",
+                        f"现在是 {now:%H:%M}，已经过了平时起床点，昨晚不知不觉一宿没睡，到现在都还没补觉。",
+                    ]
                 if fatigue >= 85:
                     lines.append(
                         f"整个人困得发飘、脑子转得慢、话少发懒（疲惫 {fatigue}），随时准备倒头补睡。"
@@ -7489,30 +7695,91 @@ class EmotionCore(Star):
                     "## 你昨晚熬夜没睡饱（刚醒不久）\n"
                     "昨晚熬夜睡太晚，今天刚起床还没睡够，带着点没睡饱的困倦和小起床气，回复简短一点、别太精神。"
                 )
-            # 3) 深夜还没睡（正在熬夜或通宵）：给一句轻量状态提示，白天返回空串（0 消耗）
+            # 3) 深夜还没睡（区分有诱因的「失眠」与无诱因的「不知不觉熬夜」），白天返回空串（0 消耗）
             if not info.get("in_base_sleep"):
                 return ""
             if info.get("all_nighter") or info.get("all_nighter_debt"):
+                if info.get("insomnia"):
+                    ins_reason = str(info.get("insomnia_reason") or "")
+                    if ins_reason == "blame":
+                        if float(self.state.get("blame_pressure", 0.0) or 0.0) < 25.0 and not self.state.get("mind_knot"):
+                            cause_line = (
+                                "刚才心里还堵着事一直没睡着，现在总算顺过气来、踏实下来了，带着困意准备去睡。"
+                            )
+                        else:
+                            cause_line = (
+                                "心里还堵着之前那点委屈/别扭没顺过来，脑子静不下来所以一直没睡着；"
+                                "说话带点闷闷的倦意，不用硬装没事，也不用刻意卖惨。"
+                            )
+                    elif ins_reason == "anxious":
+                        if (
+                            for_owner
+                            and not self.state.get("awaiting_reply")
+                            and float(self.state.get("expectation", 0.0) or 0.0) < 40.0
+                        ):
+                            cause_line = (
+                                "刚才一直惦记着等消息没睡着，现在终于等到他回话踏实下来了，带着困意准备去睡。"
+                            )
+                        else:
+                            cause_line = (
+                                "心里惦记着等消息一直没踏实下来，越等越精神，所以躺着没睡着。"
+                                if for_owner
+                                else "心里有点惦记事没踏实下来，所以躺着没睡着。"
+                            )
+                    elif ins_reason == "nap":
+                        cause_line = "因为白天/傍晚刚补过一觉，这会儿一点睡意都没有，很自然地醒着。"
+                    elif ins_reason == "desire" and for_owner:
+                        if self._sage_active() or not self.state.get("desire_unsatisfied"):
+                            cause_line = (
+                                "刚才心里燥着一直没睡着，现在彻底松弛下来、困意上来了，准备去睡。"
+                            )
+                        else:
+                            cause_line = "心里有点燥热静不下来，翻来覆去睡不着，带点深夜的躁动和懒散。"
+                    else:
+                        if (
+                            float(d.get("stress", 0.0) or 0.0) < 45.0
+                            and float(d.get("reflection", 0.0) or 0.0) < 60.0
+                            and float(self.state.get("blame_pressure", 0.0) or 0.0) < 25.0
+                        ):
+                            cause_line = (
+                                "刚才脑子里乱糟糟的一直没睡着，现在聊完总算放松下来，带着困意准备去睡。"
+                            )
+                        else:
+                            cause_line = "脑子里一直在过白天的事停不下来，人有点累但就是静不下心睡着。"
+                    lines = [
+                        "## 你今晚有点失眠（还没睡着）",
+                        f"现在是 {now:%H:%M}，已经过了平时 {info['base_bedtime']} 的睡觉点，你还没睡着：{cause_line}",
+                    ]
+                    if fatigue >= 95:
+                        lines.append(
+                            f"已经熬得很疲惫发飘了（疲惫 {fatigue}），说话短一点、带着困倦和没力气。"
+                        )
+                    elif fatigue >= 60:
+                        lines.append(
+                            f"熬到这会儿渐渐有些疲倦（疲惫 {fatigue}），说话慢一点、懒散一点，别装作精力充沛。"
+                        )
+                    return "\n".join(lines)
                 lines = [
-                    "## 你今晚通宵没睡",
-                    f"现在是 {now:%H:%M}，你平时 {info['base_bedtime']} 就睡了，今晚彻底睡不着干脆通宵了。",
+                    "## 夜深了，你还没睡",
+                    f"现在是 {now:%H:%M}，已经过了平时 {info['base_bedtime']} 的睡觉点，你这会儿还醒着（不知不觉就熬到这么晚了，并不是躺在床上失眠睡不着）。",
+                    "不要说自己“想睡却睡不着”或“决定通宵”，就按此刻还没去睡的自然状态聊天。",
                 ]
                 if fatigue >= 95:
                     lines.append(
-                        f"已经困得眼睛快睁不开了（疲惫 {fatigue}），但硬撑着还没到天亮，强打精神回话、说话很短发飘。"
+                        f"熬到现在已经困得眼睛快睁不开了（疲惫 {fatigue}），但还在撑着回话，说话很短发飘。"
                     )
                 elif fatigue >= 60:
                     lines.append(
-                        f"熬到现在已经挺困了（疲惫 {fatigue}），说话带点深夜懒散和微困感，别装作刚睡醒或精力充沛。"
+                        f"熬到这会儿渐渐有点困了（疲惫 {fatigue}），说话带点深夜懒散和微困感，别装作刚睡醒或精力充沛。"
                     )
                 else:
-                    lines.append("说话可以自然带点深夜还醒着的清醒与慵懒感，别假装刚睡醒。")
+                    lines.append("现在精神还行，只是还没去睡，自然带点深夜清醒又慵懒的感觉，别假装刚睡醒。")
                 return "\n".join(lines)
             if info.get("stay_up"):
                 return (
-                    "## 你今晚在熬夜（还没睡）\n"
-                    f"现在是 {now:%H:%M}，你平时 {info['base_bedtime']} 就睡了，今晚熬夜，打算拖到 {info['bedtime']} 左右再睡。\n"
-                    "现在还没睡着，说话可以自然带点熬夜还没睡意的感觉，不用假装已经睡醒。"
+                    "## 夜深了，你还没睡\n"
+                    f"现在是 {now:%H:%M}，已经过了平时 {info['base_bedtime']} 的睡觉点，你这会儿还在熬夜（还没困，不是想睡却睡不着）。\n"
+                    "自然带着深夜还醒着的感觉聊天就行，不用刻意说自己几点睡，也别装作已经睡醒。"
                 )
             return ""
         stress = int(float(d.get("stress", 0)))
@@ -8599,6 +8866,8 @@ class EmotionCore(Star):
                 "groggy": bool(sleep.get("groggy")),
                 "all_nighter": bool(sleep.get("all_nighter")),
                 "all_nighter_debt": bool(sleep.get("all_nighter_debt")),
+                "insomnia": bool(sleep.get("insomnia")),
+                "insomnia_reason": str(sleep.get("insomnia_reason") or ""),
                 "catch_up_nap": bool(sleep.get("catch_up_nap")),
                 "wake_ts": float(sleep.get("wake_ts") or 0.0),
             },
@@ -8888,6 +9157,7 @@ class EmotionCore(Star):
                 )
                 return
             self._apply_sage("手动收束")
+            self._maybe_soothe_insomnia(datetime.now())
             self._save_state()
             if self._sage_active():
                 left = float(st.get("sage_until", 0.0) or 0.0) - time.time()
@@ -9009,6 +9279,7 @@ class EmotionCore(Star):
             if isinstance(book, dict):
                 for key in [k for k in book if str(k).startswith("negative:")]:
                     book.pop(key, None)
+            self._maybe_soothe_insomnia(datetime.now())
             self._save_state()
             yield event.plain_result("责怪已清零，档位回到日常（九维没动）。")
             return

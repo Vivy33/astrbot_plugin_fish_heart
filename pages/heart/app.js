@@ -380,9 +380,9 @@
           : (d.sleep.asleep
             ? `睡着（${d.sleep.wake} 起${d.sleep.oversleep ? " · 顺延" : (d.sleep.stay_up ? " · 熬夜" : "")}）`
             : (d.sleep.all_nighter_debt
-              ? `通宵欠觉中（疲惫 ${Math.round(d.drives?.fatigue || 0)}/95 补睡）`
+              ? `${d.sleep.insomnia ? "失眠通宵中" : "通宵欠觉中"}（疲惫 ${Math.round(d.drives?.fatigue || 0)}/95 补睡）`
               : (d.sleep.all_nighter
-                ? `今晚通宵（平时 ${d.sleep.bedtime}-${d.sleep.wake}）`
+                ? `${d.sleep.insomnia ? "今晚失眠" : "今晚通宵"}（平时 ${d.sleep.bedtime}-${d.sleep.wake}）`
                 : `${d.sleep.bedtime}-${d.sleep.wake}${d.sleep.groggy ? " 没睡饱" : (d.sleep.stay_up ? " 熬夜" : "")}`))))
         : "关"],
       ["群友模式", cfg.group_everyone
