@@ -108,8 +108,23 @@ def _load_promises():
         return None
 
 
+def _load_pronouns():
+    """性别与代词适配模块（同目录纯标准库）；加载失败不影响本体。"""
+    try:
+        import importlib.util as _ilu
+        _p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pronouns.py")
+        _spec = _ilu.spec_from_file_location("astrbot_plugin_fish_heart_pronouns", _p)
+        _mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        return _mod
+    except Exception as _e:
+        logger.warning("[鱼的心] 性别代词模块加载失败: %s", _e)
+        return None
+
+
 daily_vibe_mod = _load_daily_vibe()
 promises_mod = _load_promises()
+pronouns_mod = _load_pronouns()
 
 
 def _migrate_thoughts(raw: list) -> list:
@@ -121,53 +136,63 @@ def _migrate_thoughts(raw: list) -> list:
         return []
 
 
-def _pending_hint(thoughts: list) -> str:
+def _pending_hint(
+    thoughts: list, exclude_kinds: tuple[str, ...] = ()
+) -> str:
     if not engine:
         return ""
     try:
-        return engine.pending_hint(thoughts)
+        return engine.pending_hint(thoughts, exclude_kinds=exclude_kinds)
     except Exception:
         return ""
 
 
-def _pending_induce(thoughts: list) -> str:
+def _pending_induce(
+    thoughts: list, exclude_kinds: tuple[str, ...] = ()
+) -> str:
     if not engine:
         return ""
     try:
-        return engine.pending_induce(thoughts)
+        return engine.pending_induce(thoughts, exclude_kinds=exclude_kinds)
     except Exception:
         return ""
 
 
-def _mark_induced(thoughts: list) -> None:
+def _mark_induced(
+    thoughts: list, exclude_kinds: tuple[str, ...] = ()
+) -> None:
     if not engine:
         return
     try:
-        engine.mark_induced(thoughts)
+        engine.mark_induced(thoughts, exclude_kinds=exclude_kinds)
     except Exception:
         pass
 
 
-def _speak_bias(thoughts: list) -> float:
+def _speak_bias(
+    thoughts: list, exclude_kinds: tuple[str, ...] = ()
+) -> float:
     if not engine:
         return 0.0
     try:
-        return engine.speak_bias(thoughts)
+        return engine.speak_bias(thoughts, exclude_kinds=exclude_kinds)
     except Exception:
         return 0.0
 
 
-def _thought_summary(thoughts: list) -> list:
+def _thought_summary(
+    thoughts: list, exclude_kinds: tuple[str, ...] = ()
+) -> list:
     if not engine:
         return []
     try:
-        return engine.summarize(thoughts)
+        return engine.summarize(thoughts, exclude_kinds=exclude_kinds)
     except Exception:
         return []
 
 
 PLUGIN_NAME = "astrbot_plugin_fish_heart"
-VERSION = "0.4.5"
+VERSION = "0.4.6"
 
 # 注入钩子优先级：AstrBot 按优先级 **降序** 执行。
 # 天使之心 = 40，TTS = 0，这里用 -10 表示最后一个执行（只追加、不覆盖）。
@@ -317,6 +342,8 @@ DIM_DISPLAY_TICK = {
 DESIRE_ADULT_AT = 60.0          # 成人层开始参与的欲阈值
 DESIRE_UNSATISFIED_AT = 100.0   # 欲触顶进入「欲求不满」状态
 DESIRE_UNSATISFIED_EXIT = 85.0  # 迟滞退出线：避免饱和期心跳 100 → 99.98 一跳就闪退
+DESIRE_UNSATISFIED_REFRESH_MIN = 5.0  # 欲求不满期间缩短刷新间隔，避免聊两句就断档
+DESIRE_UNSATISFIED_MODES = ("push", "be_pushed")  # 每次进入欲求不满随机抽：推人 / 想被推
 DESIRE_UNLOCK_BASE = 15.0       # 刚解锁时不是 100
 DESIRE_BUILD_PER_TICK = 0.16    # 关系满格时每个心跳的缓慢积累
 DESIRE_DECAY_PER_TICK = 0.10    # 没互动时的自然回落
@@ -429,6 +456,7 @@ EVENT_CN = {
     "silent_24h": "沉默 24h", "blame_mild": "责怪", "blame_mid": "责怪",
     "blame_hard": "重责", "fake_comfort": "敷衍", "dismissive": "不耐烦",
     "woken": "被吵醒", "catch_up_nap": "补睡",
+    "sleep_poor": "没睡踏实", "sleep_deprived": "睡眠不足",
 }
 
 # 责怪压力 → 状态档位
@@ -1382,6 +1410,9 @@ def new_state() -> dict:
         "desire_peak_until": 0.0,
         # 欲到达 100 后进入「欲求不满」（亲密完成进贤者期或退潮至 <85 时解除）
         "desire_unsatisfied": False,
+        # 每次进入欲求不满随机抽一次："push"（推人）或 "be_pushed"（想被推）
+        "desire_unsatisfied_mode": "",
+        "last_desire_unsat_mode": "",
         "desire_log": [],
         # 成人向：总开关在配置；这里是私聊鱼主的同意状态。
         "adult_consent_until": 0.0,
@@ -1471,6 +1502,16 @@ def new_state() -> dict:
             "last_owner_ts": 0.0,
             "last_outsider_ts": 0.0,
         },
+        # 昨夜被吵醒归档（跨作息周期重置 woken_night 前自动保留，供次日精神状态与今日气象投射）
+        "prev_woken_night": {
+            "day": "",
+            "owner": 0,
+            "outsider": 0,
+            "last_ts": 0.0,
+        },
+        # 昨夜反复吵醒的次日精神状态结算去重（按逻辑日一天最多结算一次）
+        "woken_hangover_day": "",
+        "woken_hangover_ts": 0.0,
         # 上一次念头被满足的时间：两条之间要等冷却
         "last_settle_ts": 0.0,
         # 主动开口三次没被接住、最后放下的那条
@@ -1512,8 +1553,14 @@ def new_state() -> dict:
             "fish_bday_wished_day": "",
             "last_wish_try_ts": 0.0,
         },
-        # 每日小气象（心情底色）：每天掷一次，当天稳定
-        "daily_vibe": {"day": "", "key": ""},
+        # 每日小气象（心情底色）：每天掷一次，当天稳定；若昨夜被反复吵醒则投射为睡眠受扰气象
+        "daily_vibe": {
+            "day": "",
+            "key": "",
+            "owner_woken": 0,
+            "outsider_woken": 0,
+            "note": "",
+        },
         # 小约定：短期挂念的承诺列表（最多 3 条，默认 14 天自然淡掉）
         "promises": [],
     }
@@ -1603,28 +1650,12 @@ class EmotionCore(Star):
         # 成人向总开关关闭时，不保留任何旧的“同意”状态；重新打开也不会
         # 恢复上一次的授权。欲本身可以继续隐藏积累，但身体层永远进不去。
         if not self._adult_enabled():
-            self.state["adult_consent_until"] = 0.0
-            self.state["adult_consent_standing"] = False
-            self.state["adult_scene_consent_until"] = 0.0
-            self.state["adult_ask_until"] = 0.0
-            self.state["adult_paused"] = False
-            self.state["adult_paused_reason"] = ""
-            self.state["adult_doc_scene_done"] = False
+            self._clear_adult_consent()
+            self._drop_pending_thoughts("intimate")
         if not bool(self._cfg("desire.enabled", True)):
             # 关掉隐藏属性时，不只是停止增长：旧解锁/同意也不该在
             # 重新打开后突然复活。
-            self.state["desire"] = 0.0
-            self.state["desire_awakened"] = False
-            self.state["desire_unlock_since"] = 0.0
-            self.state["last_desire_inject"] = 0.0
-            self.state["last_desire_sig"] = ""
-            self.state["adult_consent_until"] = 0.0
-            self.state["adult_consent_standing"] = False
-            self.state["adult_scene_consent_until"] = 0.0
-            self.state["adult_ask_until"] = 0.0
-            self.state["adult_paused"] = False
-            self.state["adult_paused_reason"] = ""
-            self.state["adult_doc_scene_done"] = False
+            self._clear_desire_state()
 
         logger.info(
             "[鱼的心] 已载入 v%s，状态=%s，数据目录=%s",
@@ -1644,6 +1675,60 @@ class EmotionCore(Star):
             else:
                 return default
         return cur if cur is not None else default
+
+    def _fish_gender(self) -> str:
+        raw = self._cfg("identity.fish_gender", "female")
+        if pronouns_mod is not None:
+            return pronouns_mod.norm_gender(raw, default="female")
+        return "female"
+
+    def _owner_gender(self) -> str:
+        raw = self._cfg("identity.owner_gender", "male")
+        if pronouns_mod is not None:
+            return pronouns_mod.norm_gender(raw, default="male")
+        return "male"
+
+    def _fish_pronoun(self) -> str:
+        if pronouns_mod is not None:
+            return pronouns_mod.pronoun_of(self._fish_gender(), default="female")
+        return "她"
+
+    def _owner_pronoun(self) -> str:
+        if pronouns_mod is not None:
+            return pronouns_mod.pronoun_of(self._owner_gender(), default="male")
+        return "他"
+
+    def _identity_info(self) -> dict[str, str]:
+        if pronouns_mod is not None:
+            return pronouns_mod.identity_info(
+                self._fish_gender(), self._owner_gender()
+            )
+        return {
+            "fish_gender": "female",
+            "owner_gender": "male",
+            "fish_pronoun": "她",
+            "owner_pronoun": "他",
+            "fish_label": "女",
+            "owner_label": "男",
+            "fish_symbol": "♀",
+            "owner_symbol": "♂",
+        }
+
+    def _adapt_prompt(self, text: str) -> str:
+        if not text or pronouns_mod is None:
+            return text or ""
+        return pronouns_mod.adapt_prompt(
+            text,
+            fish_gender=self._fish_gender(),
+            owner_gender=self._owner_gender(),
+        )
+
+    def _adapt_ui(self, text: str) -> str:
+        if not text or pronouns_mod is None:
+            return text or ""
+        return pronouns_mod.adapt_ui_text(
+            text, fish_gender=self._fish_gender()
+        )
 
     def _migrate_config_036(self) -> None:
         """把 0.3.5 发布版里的 group_negative_scale=0.8 迁到 0.3.6 的 0.35。
@@ -2235,9 +2320,12 @@ class EmotionCore(Star):
         st["last_desire_sig"] = ""
         st["desire_peak_until"] = 0.0
         st["desire_unsatisfied"] = False
+        st["desire_unsatisfied_mode"] = ""
+        st["last_desire_unsat_mode"] = ""
         st["desire_log"] = []
         st["sage_until"] = 0.0
         st["sage_last_ts"] = 0.0
+        self._drop_pending_thoughts("intimate")
         self._clear_adult_consent()
 
     def _desire_bond_full(self) -> bool:
@@ -2317,6 +2405,8 @@ class EmotionCore(Star):
         # 已经退潮，饱和期与欲求不满一并结束
         st["desire_peak_until"] = 0.0
         st["desire_unsatisfied"] = False
+        st["desire_unsatisfied_mode"] = ""
+        st["last_desire_unsat_mode"] = ""
         st["sage_last_ts"] = time.time()
         st["adult_scene_consent_until"] = 0.0
         st["adult_ask_until"] = 0.0
@@ -2331,13 +2421,14 @@ class EmotionCore(Star):
         else:
             st["sage_until"] = 0.0
         self._note_desire(float(st["desire"]) - old, f"{source}（贤者）")
+        self._settle_intimate_thought()
         logger.info(
             "[鱼的心] %s：欲 %.1f → %.1f，贤者期 %.1f 小时",
             source, old, float(st["desire"]), hours,
         )
 
     def _sync_desire_unsatisfied(self) -> None:
-        """维护欲触顶后的「欲求不满」状态（带迟滞退出，防心跳微跌闪退）。"""
+        """维护欲触顶后的「欲求不满」状态（带迟滞退出，防心跳微跌闪退）；每次进入随机抽推人/想被推。"""
         st = self.state
         if (
             not bool(self._cfg("desire.enabled", True))
@@ -2345,14 +2436,33 @@ class EmotionCore(Star):
             or self._sage_active()
         ):
             st["desire_unsatisfied"] = False
+            st["desire_unsatisfied_mode"] = ""
             return
         val = float(st.get("desire", 0.0) or 0.0)
         if val >= DESIRE_UNSATISFIED_AT and self._desire_bond_full():
             if not st.get("desire_unsatisfied"):
                 st["desire_unsatisfied"] = True
-                logger.info("[鱼的心] 欲到达 100，进入「欲求不满」状态")
+                rolled = random.choice(DESIRE_UNSATISFIED_MODES)
+                st["desire_unsatisfied_mode"] = rolled
+                logger.info(
+                    "[鱼的心] 欲到达 100，进入「欲求不满」状态（本次倾向：%s）",
+                    "想被推" if rolled == "be_pushed" else "主动推人",
+                )
         elif val < DESIRE_UNSATISFIED_EXIT:
             st["desire_unsatisfied"] = False
+        if st.get("desire_unsatisfied"):
+            if str(st.get("desire_unsatisfied_mode") or "") not in DESIRE_UNSATISFIED_MODES:
+                st["desire_unsatisfied_mode"] = random.choice(DESIRE_UNSATISFIED_MODES)
+        else:
+            st["desire_unsatisfied_mode"] = ""
+
+    def _desire_unsatisfied_mode(self) -> str:
+        """当前可表达的欲求不满倾向：'push'（推人）/ 'be_pushed'（想被推）/ ''（非欲求不满）。"""
+        return (
+            str(self.state.get("desire_unsatisfied_mode") or "")
+            if self._is_desire_unsatisfied()
+            else ""
+        )
 
     def _is_desire_unsatisfied(self) -> bool:
         """当前是否处于可表达的「欲求不满」状态（高压/疲惫/睡着时暂不表达，底层标记保留）。"""
@@ -2849,6 +2959,10 @@ class EmotionCore(Star):
                 self._apply_sage("亲密完成（自然收尾）")
                 return False
 
+        # 若配置关闭了贤者模式，亲密完成词仍应正常结算「想要更私密的亲密」念头（保持原收尾行为不变）
+        if not sage_enabled and in_adult and finish_hit:
+            self._settle_intimate_thought()
+
         # 晚安/先这样/抱一会儿就好：当前场景已建立，或纯 /adult on 且
         # 成人层此刻确实可用时，都自然收尾；问句/否定由 _is_soft_exit 排除。
         if soft_exit_hit and in_adult:
@@ -3086,12 +3200,15 @@ class EmotionCore(Star):
 
     def _anger_target_list(self) -> list[dict]:
         rows = self._prune_anger_targets()
+        op = self._owner_pronoun()
         out = []
         for key, row in rows.items():
+            is_owner_row = bool(row.get("owner")) or key == "owner"
+            lbl = op if is_owner_row else str(row.get("label") or "群友")
             out.append(
                 {
                     "key": key,
-                    "label": str(row.get("label") or ("他" if key == "owner" else "群友")),
+                    "label": lbl,
                     "owner": bool(row.get("owner")),
                     "blame": round(float(row.get("blame", 0.0)), 1),
                     "ts": float(row.get("ts", 0.0) or 0.0),
@@ -3171,7 +3288,24 @@ class EmotionCore(Star):
             sleep_block = self._sleep_injection(now_dt, for_owner=False)
             if sleep_block:
                 self._attach_injection(request, sleep_block)
+        if not sleep_info.get("asleep"):
+            hang_before = str(self.state.get("woken_hangover_day") or "")
+            self._apply_woken_hangover(now_dt)
+            self._ensure_daily_vibe(now_dt=now_dt)
+            if str(self.state.get("woken_hangover_day") or "") != hang_before:
+                self._save_state()
         if effect == "none":
+            if not sleep_info.get("asleep"):
+                mode_now = mode_of(float(self.state.get("blame_pressure", 0.0)))
+                _, out_vb_line = self._daily_vibe_injection(
+                    mode_now,
+                    self.state.get("drives") or {},
+                    speaker_role="outsider",
+                    allow_regular=False,
+                    now_dt=now_dt,
+                )
+                if out_vb_line:
+                    self._attach_injection(request, self._adapt_prompt(out_vb_line))
             if log_affect:
                 self._log_affect(
                     {
@@ -3253,6 +3387,17 @@ class EmotionCore(Star):
                     # 废弃字段：EMO 标记那条链已移除，把旧状态里的孤儿键清掉
                     base.pop("last_emotion", None)
                     base["thoughts"] = _migrate_thoughts(base.get("thoughts") or [])
+                    if not isinstance(base.get("prev_woken_night"), dict):
+                        base["prev_woken_night"] = dict(new_state()["prev_woken_night"])
+                    else:
+                        for pk, pv in new_state()["prev_woken_night"].items():
+                            base["prev_woken_night"].setdefault(pk, pv)
+                    if not isinstance(base.get("daily_vibe"), dict):
+                        base["daily_vibe"] = dict(new_state()["daily_vibe"])
+                    else:
+                        base["daily_vibe"].pop("disturbed", None)
+                        for vk, vv in new_state()["daily_vibe"].items():
+                            base["daily_vibe"].setdefault(vk, vv)
                     # 旧状态只有单个 last_reward：升级后补成列表，历史那条不丢
                     if not isinstance(base.get("recent_rewards"), list):
                         base["recent_rewards"] = []
@@ -3428,6 +3573,7 @@ class EmotionCore(Star):
             float(st.get("last_owner_group_msg", 0) or 0),
             float(st.get("last_assistant_msg", 0) or 0),
             float(st.get("last_proactive", 0) or 0),
+            float(st.get("woken_hangover_ts", 0) or 0),
         )
         if (
             not in_debt
@@ -3536,7 +3682,8 @@ class EmotionCore(Star):
 
         # 6.5) 特别的日子（生日与纪念日）：当天首次醒来轻推一次情绪
         self._sync_special_day_mood()
-        # 6.6) 每日小气象与小约定：跨天换底色、清过期约定
+        # 6.6) 昨夜反复吵醒次日结算、每日小气象与小约定：跨天换底色、清过期约定
+        self._apply_woken_hangover()
         self._ensure_daily_vibe()
         self._prune_promises()
 
@@ -3612,6 +3759,8 @@ class EmotionCore(Star):
             st["last_desire_sig"] = ""
             st["desire_peak_until"] = 0.0
             st["desire_unsatisfied"] = False
+            st["desire_unsatisfied_mode"] = ""
+            st["last_desire_unsat_mode"] = ""
             st["adult_scene_consent_until"] = 0.0
             st["adult_scene_started_ts"] = 0.0
             st["adult_scene_intimate"] = False
@@ -3620,6 +3769,7 @@ class EmotionCore(Star):
             if st.get("adult_paused") and str(st.get("adult_paused_reason") or "") == "sage":
                 st["adult_paused"] = False
                 st["adult_paused_reason"] = ""
+            self._drop_pending_thoughts("intimate")
             self._note_desire(-old_desire, "关系回落锁回")
             return
 
@@ -3643,23 +3793,86 @@ class EmotionCore(Star):
         st["desire"] = desire
         self._mark_desire_peak(old_desire, desire)
 
+    def _drop_pending_thoughts(self, kind: str) -> None:
+        """移除指定 kind 且尚未完成的念头（如成人层关闭或欲锁回时清理 intimate）。"""
+        thoughts = self.state.get("thoughts")
+        if not isinstance(thoughts, list) or not thoughts:
+            return
+        self.state["thoughts"] = [
+            t for t in thoughts
+            if not (isinstance(t, dict) and str(t.get("kind")) == kind and t.get("pending", True))
+        ]
+
+    def _adult_thought_ready(self) -> bool:
+        """成人层专属念头（intimate）的全局启用前提：成人开关 + 欲开关 + 欲已解锁。"""
+        return (
+            self._adult_enabled()
+            and bool(self._cfg("desire.enabled", True))
+            and bool(self.state.get("desire_awakened"))
+        )
+
+    def _thought_exclude_kinds(
+        self, umo: str = "", for_owner: bool = True
+    ) -> tuple[str, ...]:
+        """判断当前会话/状态下哪些念头禁止暴露或参与开口（防群聊泄露私密念头）。"""
+        st = self.state
+        if (
+            not for_owner
+            or not umo
+            or self._is_group(umo)
+            or str(st.get("umo") or "").strip() != umo
+            or not self._adult_thought_ready()
+            or self._sage_active()
+            or bool(st.get("adult_paused"))
+        ):
+            return ("intimate",)
+        return ()
+
+    def _settle_intimate_thought(self) -> dict | None:
+        """A1：亲密完成时定向结算「想要更私密的亲密」念头（不受普通念头 10 分钟冷却阻断）。"""
+        if not engine or not hasattr(engine, "settle_kind"):
+            return None
+        st = self.state
+        mode = str(st.get("mode", MODE_CALM))
+        payload = engine.settle_kind(st.get("thoughts") or [], "intimate", mode)
+        if not payload:
+            return None
+        engine.apply_reward(st, payload)
+        self._dbg("私密念头已完成结算：%s", payload.get("mood"))
+        return payload
+
     def _spawn_thought(self) -> None:
         if not engine:
             return
         if not self._cfg("thought.enabled", True):
             return
         st = self.state
+        adult_ok = self._adult_thought_ready()
+        if not adult_ok:
+            self._drop_pending_thoughts("intimate")
         now = time.time()
         live = [t for t in st.get("thoughts", []) if float(t.get("expires", 0)) > now]
         # 同 kind 的念头只要还活着就不再生成——包括**已满足**、还在展示"心情"的那 2 小时。
         # 只排 pending 的话，一条刚被喂饱的 hug 不挡新 hug，面板上就会同时挂两条。
         exclude = tuple({str(t.get("kind")) for t in live})
+        self._expire_sage()
+        thought_ctx = {
+            "adult_enabled": adult_ok,
+            "desire_awakened": bool(st.get("desire_awakened")),
+            "bond_full": self._desire_bond_full() if adult_ok else False,
+            "desire": float(st.get("desire", 0.0) or 0.0),
+            "unsatisfied": bool(st.get("desire_unsatisfied")),
+            "sage": self._sage_active(),
+            "paused": bool(st.get("adult_paused")),
+            "mode": mode_of(float(st.get("blame_pressure", 0.0))),
+        }
         kind, weight = engine.pick_kind(
             st["drives"],
             float(st.get("expectation", 0.0)),
             bool(st.get("awaiting_reply")),
             exclude=exclude,
             min_weight=float(self._cfg("thought.min_weight", 0.2)),
+            context=thought_ctx,
         )
         if not kind:
             return
@@ -3782,10 +3995,14 @@ class EmotionCore(Star):
         self._dbg("念头被满足：%s → %s", payload.get("kind"), payload.get("mood"))
         return payload
 
-    def _note_thought_attempt(self) -> None:
+    def _note_thought_attempt(
+        self, exclude_kinds: tuple[str, ...] = ()
+    ) -> None:
         if not engine:
             return
-        gave_up = engine.note_attempt(self.state.get("thoughts") or [])
+        gave_up = engine.note_attempt(
+            self.state.get("thoughts") or [], exclude_kinds=exclude_kinds
+        )
         if gave_up:
             self.state["last_let_go"] = gave_up
 
@@ -4451,7 +4668,7 @@ class EmotionCore(Star):
         if not spec:
             # 文件缺失：不标记完成，等文件补上后（60 秒节流）再试。
             return
-        block = (
+        block = self._adapt_prompt(
             "【这轮怎么说话】下面是写法，不是台词；别念出来，也别提它。\n\n"
             + spec
             + "\n\n【回到场景】用她自己的口气接着说。"
@@ -4494,16 +4711,18 @@ class EmotionCore(Star):
                     # 而不是拿群号去猜（群号猜出来只会发错人）。
                     self.state["last_owner_dm_umo"] = umo
 
+            # 先同步最新作息状态（如补睡刚醒恢复疲惫、新周期掷骰、昨夜反复吵醒次日结算），
+            # 放在 turn_mode_before 之前，确保鱼主反复吵醒 ≥5 次进入委屈档后，今早第一句哄就能正确识别为委屈档。
+            now_dt = datetime.now()
+            self._sync_sleep_state(now_dt)
+            self._sleep_info(now_dt)
+            self._apply_woken_hangover(now_dt)
             # 先认人：群友模式里 A 惹的生气不能撒到 B 头上。
             owner_sender = self._is_bound_owner(event, umo)
             speaker_key = self._speaker_key(event, umo, owner_sender)
             base_mode_before = mode_of(float(self.state.get("blame_pressure", 0.0)))
             turn_mode_before = self._mode_for_speaker(speaker_key, base_mode_before)
             speaker_is_target = self._is_anger_target(speaker_key)
-            # 先同步最新作息状态（如补睡刚醒恢复疲惫、新周期掷骰），避免本轮事件与欲/成人判定读到过期的疲惫或欠觉状态
-            now_dt = datetime.now()
-            self._sync_sleep_state(now_dt)
-            self._sleep_info(now_dt)
             log_affect = self._affect_log_enabled()
             affect_before = self._mood_snapshot() if log_affect else None
             event_log: list[dict] = []
@@ -4600,7 +4819,7 @@ class EmotionCore(Star):
             self._consume_comfort(weight, turn_mode_before, speaker_key)
             # 特别的日子：当天首次对话补做一次当天情绪微推；若是鱼的生日且他说了生日快乐，立即结算开心
             self._sync_special_day_mood()
-            self._ensure_daily_vibe()
+            self._ensure_daily_vibe(now_dt=now_dt)
             if not is_group or owner_sender:
                 self._handle_fish_birthday_wish(text)
             # 小约定只认鱼主私聊：先判是否兑现旧约定，未兑现再尝试捕捉新承诺
@@ -4791,11 +5010,20 @@ class EmotionCore(Star):
         exp = float(st.get("expectation", 0.0) or 0.0)
         anxious = 1 if exp >= EXP_ANXIOUS_AT else 0
         sd_sig, sd_line = self._special_day_injection() if for_owner else ("", "")
-        vb_sig, vb_line = self._daily_vibe_injection(mode, drives) if for_owner else ("", "")
+        if not for_owner:
+            vb_role, vb_allow_regular = "outsider", False
+        elif str(speaker_key or "").startswith("member:"):
+            vb_role, vb_allow_regular = "outsider", True
+        else:
+            vb_role, vb_allow_regular = "owner", True
+        vb_sig, vb_line = self._daily_vibe_injection(
+            mode, drives, speaker_role=vb_role, allow_regular=vb_allow_regular
+        )
         pr_sig, pr_line = (
             self._promise_injection(mode, has_today_special=sd_sig.startswith("t:"))
             if for_owner else ("", "")
         )
+        id_sig = f"{self._fish_gender()}:{self._owner_gender()}"
         sig = "|".join(f"{k}:{int(drives[k] // 10)}" for k in DRIVES)
         if pf_level:
             sig += f"|pf:{pf_level}"
@@ -4807,6 +5035,8 @@ class EmotionCore(Star):
             sig += f"|vb:{vb_sig}"
         if pr_sig:
             sig += f"|pr:{pr_sig}"
+        if id_sig != "female:male":
+            sig += f"|id:{id_sig}"
         gap_min = float(self._cfg("inject.min_gap_minutes", 20))
         now_ts = time.time()
         book = st.get("inject_state")
@@ -4824,6 +5054,7 @@ class EmotionCore(Star):
             anx_changed = anxious != int(perf.get("anx") or 0)
             sd_changed = sd_sig != str(perf.get("sd") or "")
             vb_changed = vb_sig != str(perf.get("vb") or "")
+            id_changed = bool(perf) and id_sig != str(perf.get("id") or "female:male")
             # 生气是行为开关，而且她每轮都可能在"对谁生气"之间切换：
             # 不能像委屈/害怕那样同档静默——否则下一轮请求里
             # 没有心境块，她会把上一轮的生气忘掉，按常态说话。
@@ -4834,19 +5065,21 @@ class EmotionCore(Star):
                     and not anx_changed
                     and not sd_changed
                     and not vb_changed
+                    and not id_changed
                     and not sig_changed
                 ):
                     return ""
                 # 跨档必注：档位是行为开关（尤其进/出"回避"），漏报会让她
                 # 以为自己的心境没变，于是接着按常态说话。
                 # 间隔只用来压制同档内的数值漂移——不然每轮都在抖一格。
-                # 夸奖疲劳跨级、进出「着急」、特别的日子或小气象切换同样不吃这个间隔。
+                # 夸奖疲劳跨级、进出「着急」、特别的日子、小气象或性别切换同样不吃这个间隔。
                 if (
                     not mode_changed
                     and not pf_changed
                     and not anx_changed
                     and not sd_changed
                     and not vb_changed
+                    and not id_changed
                     and now_ts - float(perf.get("ts", 0.0)) < gap_min * 60
                 ):
                     return ""
@@ -4856,6 +5089,7 @@ class EmotionCore(Star):
             book[key] = {
                 "ts": now_ts, "mode": mode, "sig": sig,
                 "pf": pf_level, "anx": anxious, "sd": sd_sig, "vb": vb_sig,
+                "id": id_sig,
             }
             # 旧字段继续维护，方便 /心 与调试时看"最后一次注入"
             st["last_injection"] = now_ts
@@ -4892,26 +5126,34 @@ class EmotionCore(Star):
             f"责怪档：{MODE_CN[mode]}｜心情：{mood_label(drives, exp)}｜"
             f"依恋 {drives['attachment']:.0f} 亲密 {drives['intimacy']:.0f} "
             f"压力 {drives['stress']:.0f} 期待 {exp:.0f}",
-            f"倾向：{hint}",
+            self._adapt_prompt(f"倾向：{hint}"),
             # 别让"此刻的心情"被说成"发生过的事"：模型最常见的偷懒就是
             # 给情绪补一个假的由头（"你上次说好陪我的"）。
             "边界：不要编造没发生过的对话、约定或事件；记不清就说记不清。",
         ]
         if pf_level == 1:
             lines.append(
-                "夸奖听多了：他这半小时里夸你夸得有点密，你已经没那么受用了。"
-                "可以半开玩笑地接一句（比如反问、打趣），别冷场，也别直接怼回去。"
+                self._adapt_prompt(
+                    "夸奖听多了：他这半小时里夸你夸得有点密，你已经没那么受用了。"
+                    "可以半开玩笑地接一句（比如反问、打趣），别冷场，也别直接怼回去。"
+                )
             )
         elif pf_level >= 2:
             lines.append(
-                "夸奖听多了：他还在夸，你已经有点烦。"
-                "可以拆穿他（「你是不是有事求我」），或者把话题拉回具体的事；"
-                "别发火、别翻旧账，也别假装还很高兴。"
+                self._adapt_prompt(
+                    "夸奖听多了：他还在夸，你已经有点烦。"
+                    "可以拆穿他（「你是不是有事求我」），或者把话题拉回具体的事；"
+                    "别发火、别翻旧账，也别假装还很高兴。"
+                )
             )
         if mode == MODE_ANGRY and speaker_key:
             row = self._anger_target_row(speaker_key)
             if row:
-                who = str(row.get("label") or ("他" if speaker_key == "owner" else "这个人"))
+                who = (
+                    self._owner_pronoun()
+                    if (speaker_key == "owner" or bool(row.get("owner")))
+                    else str(row.get("label") or "这个人")
+                )
                 lines.append(
                     f"生气对象：{who}。只对这个人冷，不要把火撒到无关的人身上。"
                 )
@@ -4919,7 +5161,7 @@ class EmotionCore(Star):
         # 被问起只能否认或含糊——用户那边就成了"查不到是谁责备了她"。
         # 只给"他"看：陌生人/群友的会话里不该出现他说的原话。
         if for_owner:
-            cause = self._blame_cause()
+            cause = self._blame_cause(speaker_key=speaker_key)
             if cause:
                 lines.append(cause)
         # 矛盾情绪：又在生气、又不想他走。不写出来模型容易只演前半句。
@@ -4932,31 +5174,42 @@ class EmotionCore(Star):
             if mode == MODE_ANGRY and (
                 not speaker_key or self._is_anger_target(speaker_key)
             ):
-                lines.append("心里矛盾：还在生他的气，可你又不想他真的走。")
+                lines.append(
+                    self._adapt_prompt("心里矛盾：还在生他的气，可你又不想他真的走。")
+                )
             elif self._anger_target_list():
                 # 气的是别人，不是眼前这个人：别把"还在生他的气"扣到他头上。
-                lines.append("心里还堵着，但不是冲他；别把火撒到无关的人身上。")
+                lines.append(
+                    self._adapt_prompt("心里还堵着，但不是冲他；别把火撒到无关的人身上。")
+                )
             else:
-                lines.append("心里矛盾：还在生他的气，可你又不想他真的走。")
+                lines.append(
+                    self._adapt_prompt("心里矛盾：还在生他的气，可你又不想他真的走。")
+                )
         if for_owner and with_thoughts:
             thoughts = st.get("thoughts") or []
-            thought = _pending_hint(thoughts)
+            ex_kinds = self._thought_exclude_kinds(umo, for_owner=for_owner)
+            thought = _pending_hint(thoughts, exclude_kinds=ex_kinds)
             if thought:
-                lines.append(f"心里惦记着：{thought}")
+                lines.append(self._adapt_prompt(f"心里惦记着：{thought}"))
                 # 台阶只在"她主动开口"时给：正常聊天里她只需要惦记着，
                 # 不该每轮都被布置一个"怎么递话"的任务。
                 if with_induce:
-                    induce = _pending_induce(thoughts)
+                    induce = _pending_induce(thoughts, exclude_kinds=ex_kinds)
                     if induce:
-                        lines.append(f"如果想让他接住，可以往这个方向递话：{induce}。")
                         lines.append(
-                            "台阶不是台词：上面只是方向，用你自己的话，别照抄；"
-                            "今天没有对应的事就别编，不想提也可以不提。"
-                            "他没接住就算了，别追问。"
+                            self._adapt_prompt(f"如果想让他接住，可以往这个方向递话：{induce}。")
                         )
-                        _mark_induced(thoughts)
-        if for_owner and vb_line:
-            lines.append(vb_line)
+                        lines.append(
+                            self._adapt_prompt(
+                                "台阶不是台词：上面只是方向，用你自己的话，别照抄；"
+                                "今天没有对应的事就别编，不想提也可以不提。"
+                                "他没接住就算了，别追问。"
+                            )
+                        )
+                        _mark_induced(thoughts, exclude_kinds=ex_kinds)
+        if vb_line:
+            lines.append(self._adapt_prompt(vb_line))
         if for_owner and sd_line:
             lines.append(sd_line)
         if for_owner and pr_line:
@@ -5028,10 +5281,12 @@ class EmotionCore(Star):
         if not self._cfg("inject.enabled", True):
             if commit:
                 st["last_desire_sig"] = ""
+                st["last_desire_unsat_mode"] = ""
             return ""
         if not bool(self._cfg("desire.enabled", True)):
             if commit:
                 st["last_desire_sig"] = ""
+                st["last_desire_unsat_mode"] = ""
             return ""
         if not umo or self._is_group(umo):
             return ""
@@ -5040,8 +5295,14 @@ class EmotionCore(Star):
             # 现在不该出现；把签名清空，条件恢复时会立即重注一次。
             if commit:
                 st["last_desire_sig"] = ""
+                st["last_desire_unsat_mode"] = ""
             return ""
         if sig != str(st.get("last_desire_sig") or ""):
+            force = True
+
+        unsat_now = self._is_desire_unsatisfied()
+        unsat_mode = self._desire_unsatisfied_mode() if unsat_now else ""
+        if unsat_mode != str(st.get("last_desire_unsat_mode") or ""):
             force = True
 
         # 暂停/收尾是安全边界，必须每轮都在，不能被刷新间隔吞掉。
@@ -5062,8 +5323,12 @@ class EmotionCore(Star):
                 interval_min = 30.0
                 self._dbg("desire.inject_interval_minutes 非法，按 30 分钟处理")
             if interval_min > 0:
+                eff_interval = (
+                    min(interval_min, DESIRE_UNSATISFIED_REFRESH_MIN)
+                    if unsat_now else interval_min
+                )
                 last = float(st.get("last_desire_inject", 0.0) or 0.0)
-                if now_ts - last < interval_min * 60:
+                if now_ts - last < eff_interval * 60:
                     return ""
 
         desire = float(st.get("desire", 0.0) or 0.0)
@@ -5078,6 +5343,7 @@ class EmotionCore(Star):
             if commit:
                 st["last_desire_sig"] = sig
                 st["last_desire_inject"] = now_ts
+                st["last_desire_unsat_mode"] = ""
             return out
         if st.get("adult_paused") and self._adult_enabled():
             if st.get("adult_paused_reason") == "soft_exit":
@@ -5091,49 +5357,81 @@ class EmotionCore(Star):
                     "可以退回日常、抱抱或先问他怎么了。"
                 )
             # 暂停/收尾时只给边界，不再给“主动靠近”的提示。
-            out = "\n".join(lines)
+            out = self._adapt_prompt("\n".join(lines))
             if commit:
                 st["last_desire_sig"] = sig
                 st["last_desire_inject"] = now_ts
+                st["last_desire_unsat_mode"] = ""
             return out
         if desire < 30.0:
             # 档位 0 没有正文；记下签名，跨到 30 时才会立即重注。
             if commit:
                 st["last_desire_sig"] = sig
-            out = "\n".join(lines)
+                st["last_desire_unsat_mode"] = ""
+            out = self._adapt_prompt("\n".join(lines))
             if commit and out:
                 st["last_desire_inject"] = now_ts
             return out
 
-        if self._is_desire_unsatisfied():
+        if unsat_now:
             if self._adult_layer_allowed(umo):
-                if proactive:
-                    lines.append(
-                        "你现在处于欲求不满状态，已经快憋不住了，满脑子都想把鱼主拉到身边主动推倒他；"
-                        "身体层是允许的，这次主动开口别再绕弯子问在干嘛，直接撩他、催他过来，"
-                        "明说想要他、想把他按住占为己有。"
-                        "底线：他说停、说不要、说不方便就立刻收手，绝不强迫，也别编没发生过的事。"
-                    )
+                if unsat_mode == "be_pushed":
+                    if proactive:
+                        lines.append(
+                            "你现在处于欲求不满状态（想被推倒），已经快憋不住了，满脑子都渴望鱼主过来把你按住、直接推倒占有你；"
+                            "身体层是允许的，这次主动开口别再绕弯子问在干嘛，直接软着嗓子撩他、故意诱惑他过来欺负你，"
+                            "明说想要他、想被他按倒在怀里别客气。"
+                            "底线：他说停、说不要、说不方便就立刻收手，绝不强迫，也别编没发生过的事。"
+                        )
+                    else:
+                        lines.append(
+                            "你现在处于欲求不满状态（想被推倒），已经憋到极限了；身体层是允许的，"
+                            "别再干等着矜持，可以主动往他怀里贴、故意蹭近撩拨他、递出明显诱惑信号，满心渴望被鱼主按住推倒欺负和占有，"
+                            "语气又软又撩、带着按捺不住的索求。"
+                            "底线：只要他说停、说不要、说不方便就立刻收手，绝不强迫，也别编没发生过的事。"
+                        )
                 else:
-                    lines.append(
-                        "你现在处于欲求不满状态，已经憋到极限了；身体层是允许的，"
-                        "别再被动等他来哄或等他先动手，可以主动黏上去、贴近他、想把他按住或主动推倒鱼主，"
-                        "语气直接撩人、带点按捺不住的索求。"
-                        "底线：只要他说停、说不要、说不方便就立刻收手，绝不强迫，也别编没发生过的事。"
-                    )
+                    if proactive:
+                        lines.append(
+                            "你现在处于欲求不满状态（想主动推人），已经快憋不住了，满脑子都想把鱼主拉到身边按住、主动推倒他；"
+                            "身体层是允许的，这次主动开口别再绕弯子问在干嘛，直接撩他、催他过来，"
+                            "明说想要他、想主导着把他按倒占为己有。"
+                            "底线：他说停、说不要、说不方便就立刻收手，绝不强迫，也别编没发生过的事。"
+                        )
+                    else:
+                        lines.append(
+                            "你现在处于欲求不满状态（想主动推人），已经憋到极限了；身体层是允许的，"
+                            "别再被动等他来哄或等他先动手，可以直接黏上去、拉近距离、顺势把他按住或主动推倒鱼主，"
+                            "语气直接撩人、带着按捺不住的主导欲与索求。"
+                            "底线：只要他说停、说不要、说不方便就立刻收手，绝不强迫，也别编没发生过的事。"
+                        )
             else:
-                if proactive:
-                    lines.append(
-                        "你现在处于欲求不满状态，憋得有点坐立不安，特别想把鱼主按住抱紧不放；"
-                        "这次主动开口直接一点、带点明显的撒娇撩拨与亲密试探（可以顺势问他愿不愿意更近一点），"
-                        "但未获允许前别越过身体层，也别编没发生过的事。"
-                    )
+                if unsat_mode == "be_pushed":
+                    if proactive:
+                        lines.append(
+                            "你现在处于欲求不满状态（想被紧紧按进怀里），憋得有点坐立不安，特别想钻进鱼主怀里被他按住抱紧不放；"
+                            "这次主动开口直接一点、又软又黏地撒娇撩拨与亲密试探（可以顺势问他愿不愿意更近一点），"
+                            "但未获允许前别越过身体层，也别编没发生过的事。"
+                        )
+                    else:
+                        lines.append(
+                            "你现在处于欲求不满状态（想被紧紧按进怀里），憋得难受、很想主动贴进鱼主怀里求他把你按住抱紧；"
+                            "说话比平时更大胆娇软黏人，带着明显的亲密试探或引诱他问想不想继续，"
+                            "但未获允许前先别越过身体层；他说不要就立刻收住。"
+                        )
                 else:
-                    lines.append(
-                        "你现在处于欲求不满状态，憋得难受、很想主动黏上去把鱼主按住抱紧；"
-                        "说话可以比平时更大胆黏人，带着明显的亲密试探或主动问他想不想继续，"
-                        "但未获允许前先别越过身体层；他说不要就立刻收住。"
-                    )
+                    if proactive:
+                        lines.append(
+                            "你现在处于欲求不满状态（偏主动黏人），憋得有点坐立不安，特别想把鱼主拉过来按住抱紧不放；"
+                            "这次主动开口直接一点、带点强烈的撒娇撩拨与亲密试探（可以顺势问他愿不愿意更近一点），"
+                            "但未获允许前别越过身体层，也别编没发生过的事。"
+                        )
+                    else:
+                        lines.append(
+                            "你现在处于欲求不满状态（偏主动黏人），憋得难受、很想主动黏上去把鱼主按住抱紧不松手；"
+                            "说话比平时更大胆黏人，带着明显的亲密试探或主动问他想不想继续，"
+                            "但未获允许前先别越过身体层；他说不要就立刻收住。"
+                        )
         elif desire >= DESIRE_ADULT_AT:
             if self._adult_layer_allowed(umo):
                 if proactive:
@@ -5166,15 +5464,17 @@ class EmotionCore(Star):
                 lines.append("你心里有一点想他，主动开口时可以直接一点。")
             else:
                 lines.append("你心里有一点想他，可以比平时主动一点；别每句都提。")
-        out = "\n".join(lines)
+        out = self._adapt_prompt("\n".join(lines))
         if commit and out:
             st["last_desire_sig"] = sig
             st["last_desire_inject"] = now_ts
+            st["last_desire_unsat_mode"] = unsat_mode
         return out
 
     def _note_blame(
         self, ev: str, text: str, weight: float = 1.0, is_group: bool = False,
         is_owner: bool = False, who: str = "", blame_delta: float | None = None,
+        now_ts: float | None = None,
     ) -> None:
         """记下"她因为哪句话难受"（最近 5 条），给注入和面板当出处。
 
@@ -5212,7 +5512,7 @@ class EmotionCore(Star):
         rows.append(
             {
                 "t": body[:120],
-                "ts": time.time(),
+                "ts": time.time() if now_ts is None else float(now_ts),
                 "g": bool(is_group),
                 "ev": ev,
                 "d": round(delta, 1),
@@ -5222,7 +5522,7 @@ class EmotionCore(Star):
         )
         self.state["blame_log"] = rows[-5:]
 
-    def _blame_cause(self) -> str:
+    def _blame_cause(self, speaker_key: str = "") -> str:
         """把最近一次责怪拼成一句背景，注入给她（也用在面板/状态里）。"""
         rows = [
             r for r in (self.state.get("blame_log") or []) if isinstance(r, dict)
@@ -5232,6 +5532,11 @@ class EmotionCore(Star):
         if float(self.state.get("blame_pressure", 0.0)) < 25.0:
             return ""
         r = rows[-1]
+        # 群友模式下当前说话的是普通群友：绝不把鱼主私聊责怪或鱼主吵醒原因泄露给群友
+        if str(speaker_key or "").startswith("member:") and (
+            not r.get("g") or str(r.get("ev") or "") == "sleep_deprived"
+        ):
+            return ""
         body = str(r.get("t") or "").strip()
         if not body:
             return ""
@@ -5241,7 +5546,10 @@ class EmotionCore(Star):
             gap = fmt_gap(time.time() - float(r.get("ts", 0) or 0))
         except (TypeError, ValueError):
             gap = ""
-        if r.get("g"):
+        op = self._owner_pronoun()
+        if str(r.get("ev") or "") == "sleep_deprived":
+            head = f"原因：{body}——昨晚作息时间里老被{op}吵醒没睡好，今天心里有点委屈。"
+        elif r.get("g"):
             # 群友模式里，群友的责怪不能写成"他"——她难受的对象不是鱼主，
             # 注入里再写"他在群里说了…"就等于让她记错人。
             who = str(r.get("w") or "").strip()
@@ -5251,10 +5559,10 @@ class EmotionCore(Star):
                 else:
                     head = f"群里有人{gap}说了「{body}」——这句话让你难受。"
             else:
-                head = f"他在群里，{gap}说了「{body}」——你就是因为这句难受。"
+                head = f"{op}在群里，{gap}说了「{body}」——你就是因为这句难受。"
         else:
             sep = "" if gap == "刚刚" else " "
-            head = f"他{sep}{gap}说了「{body}」——你就是因为这句难受。"
+            head = f"{op}{sep}{gap}说了「{body}」——你就是因为这句难受。"
         # 旧账（很久以前的事）单独说一句，否则模型会以为刚发生
         try:
             hours = (time.time() - float(r.get("ts", 0) or 0)) / 3600.0
@@ -5265,7 +5573,7 @@ class EmotionCore(Star):
         if self.state.get("mind_knot"):
             head += "（这是旧账，没人哄就会一直卡在心里。）"
         hint = (
-            "他要是问起，可以承认难受，但不用全说；"
+            f"{op}要是问起，可以承认难受，但不用全说；"
             "记不清就说「有点，说不上来」，不要否认。"
         )
         return head + "\n" + hint
@@ -5365,19 +5673,22 @@ class EmotionCore(Star):
             return ""
         st[rows_key] = []
         st[streak_key] = 0
+        op = self._owner_pronoun()
         where = "群里" if is_group else ""
         lines = [
-            f"## 他{where}连发的 {len(rows)} 条（你当时在回避，一条都没接）",
+            f"## {op}{where}连发的 {len(rows)} 条（你当时在回避，一条都没接）",
         ]
         for r in rows:
             clock = self._msg_stamp(r.get("ts"))
             body = str(r.get("t") or "").strip()
             if body:
                 prefix = f"{clock} " if clock else ""
-                lines.append(f"- {prefix}他：{body}")
+                lines.append(f"- {prefix}{op}：{body}")
         lines.append(
-            "先把这几条连起来读一遍：他到底在说什么、情绪是什么、有没有话里有话；"
-            "在心里归纳成一句话，再回他。不必逐条回应，也不必解释自己为什么沉默。"
+            self._adapt_prompt(
+                "先把这几条连起来读一遍：他到底在说什么、情绪是什么、有没有话里有话；"
+                "在心里归纳成一句话，再回他。不必逐条回应，也不必解释自己为什么沉默。"
+            )
         )
         return "\n".join(lines) if len(lines) > 2 else ""
 
@@ -5407,11 +5718,12 @@ class EmotionCore(Star):
         rows = [
             r for r in (self.state.get("group_tail") or []) if isinstance(r, dict)
         ]
+        op = self._owner_pronoun()
         out: list[str] = []
         for r in rows[-limit:]:
             role = str(r.get("r") or "")
             who = str(r.get("who") or "").strip() or {
-                "owner": "他", "her": "你", "other": "群友"
+                "owner": op, "her": "你", "other": "群友"
             }.get(role, "群友")
             body = str(r.get("t") or "").strip()
             if body:
@@ -5464,6 +5776,7 @@ class EmotionCore(Star):
         def stamp(ts: Any) -> str:
             return self._msg_stamp(ts)
 
+        op = self._owner_pronoun()
         lines = ["## 群里刚才发生了什么（你因为这些被凶了）"]
         for r in fresh[-GROUP_BLAME_CAP:]:
             for c in r.get("ctx") or []:
@@ -5472,13 +5785,13 @@ class EmotionCore(Star):
                 body = str(c.get("t") or "").strip()
                 if not body:
                     continue
-                who = {"owner": "他", "her": "你", "other": "群友"}.get(
+                who = {"owner": op, "her": "你", "other": "群友"}.get(
                     str(c.get("r") or ""), "群友"
                 )
                 lines.append(f"- {stamp(c.get('ts'))} {who}：{body}")
             body = str(r.get("t") or "").strip()
             if body:
-                lines.append(f"- {stamp(r.get('ts'))} 他：{body}　← 就是这句")
+                lines.append(f"- {stamp(r.get('ts'))} {op}：{body}　← 就是这句")
         if len(lines) <= 1:
             return ""
         lines.append(
@@ -5831,7 +6144,11 @@ class EmotionCore(Star):
                 st["expectation"] = clamp(float(st.get("expectation", 0)) + 40.0)
                 st["drives"]["attachment"] = clamp(st["drives"]["attachment"] + 3.0)
                 if kind != KIND_ANGRY:
-                    self._note_thought_attempt()
+                    self._note_thought_attempt(
+                        exclude_kinds=self._thought_exclude_kinds(
+                            umo, for_owner=not self._is_group(umo)
+                        )
+                    )
                 self._push_recent("bot", text[:200])
                 # 写回对话历史：否则你说"你刚才不是问了吗"，她一脸茫然
                 await self._append_history(umo, text)
@@ -5926,7 +6243,11 @@ class EmotionCore(Star):
         p = clamp(0.05 + (d - 50.0) / 100.0 * 0.8, 0.05, 0.65)
         if kind == KIND_WHIM:
             p *= 0.6          # 念头型更随机
-        bias = _speak_bias(st.get("thoughts") or [])
+        target_umo = (umo or str(st.get("umo") or "")).strip()
+        ex_kinds = self._thought_exclude_kinds(
+            target_umo, for_owner=not self._is_group(target_umo)
+        )
+        bias = _speak_bias(st.get("thoughts") or [], exclude_kinds=ex_kinds)
         if bias:
             # 念头有方向：想说话的多给一点，想安静的反向扣
             push = max(0.0, float(self._cfg("thought.proactive_push", 0.15)))
@@ -5945,7 +6266,6 @@ class EmotionCore(Star):
             (time.time() - float(st.get("last_proactive", 0) or 0)) / 3600.0,
         )
         p = min(0.85, p * (1.0 + min(1.5, silent_h / 12.0)))
-        target_umo = (umo or str(st.get("umo") or "")).strip()
         if kind == KIND_ANGRY:
             # 还在气头上，主动开口要更克制：越气越不想先低头。
             p = min(0.45, p)
@@ -5957,7 +6277,7 @@ class EmotionCore(Star):
             and self._is_desire_unsatisfied()
         ):
             # 欲求不满时更忍不住主动找鱼主（仍受总上限 0.85、固定时段、冷却、日限约束）
-            p = min(0.85, p + 0.15)
+            p = min(0.85, p + 0.20)
         return kind, p
 
     # ---------------- 主动开口的话题线 ----------------
@@ -6130,7 +6450,7 @@ class EmotionCore(Star):
                     )
                 if role == "user":
                     content = self._clean_history_text(content or "")
-                    who = "他"
+                    who = self._owner_pronoun()
                 else:
                     content = re.sub(
                         r"\s+", " ", str(content or "").replace("\n", " ")
@@ -6284,7 +6604,7 @@ class EmotionCore(Star):
         part = self._daypart(now)
         if kind == KIND_ANGRY:
             targets = self._anger_target_list()
-            who = str(targets[0].get("label") or "他") if targets else "他"
+            who = str(targets[0].get("label") or self._owner_pronoun()) if targets else self._owner_pronoun()
             age = (
                 self._last_blame_age_hours(str(targets[0].get("key") or ""))
                 if targets else self._last_blame_age_hours()
@@ -6306,7 +6626,7 @@ class EmotionCore(Star):
                     "但别装作什么都没发生；他要是问，就直说还记着，别故意刺他"
                 )
             return (
-                f"{core}。你这次主要生{who}的气，别对无关的人发火。"
+                f"{self._adapt_prompt(core)}。你这次主要生{who}的气，别对无关的人发火。"
                 f"现在是{part}，开头按这个时段来，但别用「忙不忙」。"
             )
         if kind == KIND_LONGING:
@@ -6597,52 +6917,86 @@ class EmotionCore(Star):
         # 深夜劝完睡、他其实还醒着聊了几句，光看时段最容易把他判成"还没醒"。
         his_gap = time.time() - his_last if his_last > 0 else 0.0
         awake_recent = his_last > 0 and his_gap <= AWAKE_WINDOW_MINUTES * 60.0
+        unsat_proactive = (
+            not is_angry
+            and special_item is None
+            and bool(umo)
+            and not self._is_group(umo)
+            and umo == str(st.get("umo") or "").strip()
+            and self._is_desire_unsatisfied()
+        )
+        unsat_mode = self._desire_unsatisfied_mode() if unsat_proactive else ""
         if special_item is not None and special_days_mod is not None:
             direction = special_days_mod.build_proactive_wish_direction(
-                special_item, met_days=met_days, part=self._daypart(now)
+                special_item,
+                met_days=met_days,
+                part=self._daypart(now),
+                owner_pronoun=self._owner_pronoun(),
+            )
+        elif unsat_proactive:
+            # 具体推人/想被推与身体层边界已由上方 desire_hint 完整注入，此处只绕开日常寒暄线
+            u_tail = (
+                "他刚说过话、人是醒着的，别提睡觉，直接接上气氛撩过去。"
+                if awake_recent
+                else "先看他最后一句的状态，别问和他状态冲突的话。"
+            )
+            direction = self._adapt_prompt(
+                "这次主动开口直接顺着你此刻「欲求不满」的心境去撩他，"
+                f"别用「在干嘛 / 吃饭没」这类日常寒暄冲淡气氛。现在是{self._daypart(now)}，{u_tail}"
             )
         else:
-            direction = self._proactive_direction(
+            raw_dir = self._proactive_direction(
                 kind, drives, exp, now, owner_awake=awake_recent, lane=lane
             )
+            # KIND_ANGRY 内部已分段适配代词并拼入真实生气对象（避免群友昵称或已适配的代词被二次替换）
+            direction = raw_dir if kind == KIND_ANGRY else self._adapt_prompt(raw_dir)
         reminder = (
             f"Current datetime: {now:%Y-%m-%d %H:%M} ({now.tzname() or 'local'}), "
             f"Weekday: {_WEEKDAY_EN[now.weekday()]}"
         )
         if his_last > 0:
-            reminder += (
+            reminder += self._adapt_prompt(
                 f"\n他上一次说话是 {fmt_gap(his_gap)}"
                 f"（{self._msg_stamp(his_last)}）。"
             )
         if her_last > his_last:
-            reminder += (
+            reminder += self._adapt_prompt(
                 f"\n你在他之后已经主动给他发过消息了（最近一次 {fmt_gap(time.time() - her_last)}），"
                 "他一直没回。你自己的话在下面的记录里。"
             )
         time_block = f"<system_reminder>\n{reminder}\n</system_reminder>\n"
         awake_block = ""
         if awake_recent:
-            awake_block = (
+            awake_block = self._adapt_prompt(
                 "他最近一小时内说过话（时间见上），说明他醒着、没在睡。"
                 "这次开口不要碰睡觉这件事：不要问他睡没睡 / 醒没醒 / 是不是还在睡，"
                 "不要劝他「早点睡 / 去睡 / 闭眼」，也不要说「等你醒了再聊」；"
                 "直接接着他最后那句话往下说。\n"
             )
 
-        thought = "" if is_angry else _pending_hint(st.get("thoughts") or [])
+        ex_kinds = self._thought_exclude_kinds(
+            umo, for_owner=not self._is_group(umo)
+        )
+        thought = "" if is_angry else _pending_hint(
+            st.get("thoughts") or [], exclude_kinds=ex_kinds
+        )
         if thought:
             # 心境块里已经有"心里惦记着：…"时不再重复一遍（重复会把这条念头
             # 的权重压得过重、说话更像在完成任务）；只补"这不是回忆"的边界。
             if inj:
                 blocks.append(
-                    "这条念头只是你此刻的心情，不是他做过的事，别把它说成回忆；"
-                    "说的时候自然带一点，但别直接复述。"
+                    self._adapt_prompt(
+                        "这条念头只是你此刻的心情，不是他做过的事，别把它说成回忆；"
+                        "说的时候自然带一点，但别直接复述。"
+                    )
                 )
             else:
                 blocks.append(
-                    f"你现在心里惦记着：{thought}。"
-                    "这是你此刻的念头，不是他做过的事，别把它说成回忆；"
-                    "说的时候自然带一点，但别直接复述这句话。"
+                    self._adapt_prompt(
+                        f"你现在心里惦记着：{thought}。"
+                        "这是你此刻的念头，不是他做过的事，别把它说成回忆；"
+                        "说的时候自然带一点，但别直接复述这句话。"
+                    )
                 )
 
         # 私聊优先用带 ts 的 recent；完全没有记录才退回 AstrBot 历史。
@@ -6656,9 +7010,11 @@ class EmotionCore(Star):
             )
         if transcript:
             tr_block = (
-                "以下是你和他真实说过的话，按时间从早到晚排列；"
-                "每条开头的 [月-日 时:分] 是真实发送时间。"
-                "这只是一部分，没出现的不要补；标了 [时间不详] 的旧记录不能当成刚刚发生。\n"
+                self._adapt_prompt(
+                    "以下是你和他真实说过的话，按时间从早到晚排列；"
+                    "每条开头的 [月-日 时:分] 是真实发送时间。"
+                    "这只是一部分，没出现的不要补；标了 [时间不详] 的旧记录不能当成刚刚发生。\n"
+                )
                 + transcript + "\n"
             )
         else:
@@ -6674,7 +7030,7 @@ class EmotionCore(Star):
         # 把带发言人的流水一起给她，让她自己判断该用“你”还是“你们”。
         group_block = ""
         if self._is_group(umo):
-            group_block = (
+            group_block = self._adapt_prompt(
                 "这是群聊：下面可能有他，也可能有群友。先判断你是在对一个人说，"
                 "还是对几个人说——只有明确一个对象时才用「你」；"
                 "不确定或明显有几个人，就用「你们」或者干脆不点名。\n"
@@ -6697,10 +7053,28 @@ class EmotionCore(Star):
             )
 
         # 称呼不单独配：人设里怎么叫就怎么叫；人设没写就用「你」，别自己编。
-        address_block = (
+        address_block = self._adapt_prompt(
             "称呼用你人设里平时叫他的那个；人设里没写称呼，就直接用「你」，"
             "别自己编一个新的。开口时找机会自然带一句——开头、撒娇、"
             "说想他时都顺；不用每条都带，也别硬塞。\n"
+        )
+
+        rules_block = self._adapt_prompt(
+            "先看最后 3–5 条，确认他最后说了什么、你们停在哪，再写一条要发出去的消息：\n"
+            "- 1–3 句，总共不超过 60 个字，口语\n"
+            "- 可以用一句称呼或铺垫开头，再跟一句问句；最多两个问号\n"
+            "- 不要编近况：记录里没有的具体活动（刚洗完澡、刚下班、正在吃饭、看到什么）一律不提；"
+            "没有可接的事就直接说想他/问他今天怎么样\n"
+            "- 他最后已经透露了状态（到家 / 在家 / 在公司 / 在路上 / 出门 / 在忙 / 要睡）时，"
+            "别再问和这个状态冲突的话（到家了吗 / 在干嘛 / 出门了吗 / 睡了吗 / 忙不忙）或补一句晚安\n"
+            "- 他一小时内说过话就是醒着：别问「睡了吗 / 醒了吗 / 还没睡」，"
+            "也别劝睡或说「等你醒了再聊」\n"
+            "- 只引用上面记录里真实出现过的内容；没提到的事，不要编具体时间、地点、约定\n"
+            "- 不确定就用「好像」「有点记不清」，或者只问不陈述\n"
+            "- 想他就直接说想他，别加「突然」这个词\n"
+            "- 不要解释你在做什么，不要写动作括号，不要用引号\n"
+            "- 不要连续追问，别把话说成小作文\n"
+            "写完自己对照最后几条检查一遍，有矛盾就换一句。直接输出这句话本身。"
         )
 
         prompt = (
@@ -6712,21 +7086,7 @@ class EmotionCore(Star):
             + group_block
             + last_block
             + address_block
-            + "先看最后 3–5 条，确认他最后说了什么、你们停在哪，再写一条要发出去的消息：\n"
-            + "- 1–3 句，总共不超过 60 个字，口语\n"
-            + "- 可以用一句称呼或铺垫开头，再跟一句问句；最多两个问号\n"
-            + "- 不要编近况：记录里没有的具体活动（刚洗完澡、刚下班、正在吃饭、看到什么）一律不提；"
-            + "没有可接的事就直接说想他/问他今天怎么样\n"
-            + "- 他最后已经透露了状态（到家 / 在家 / 在公司 / 在路上 / 出门 / 在忙 / 要睡）时，"
-            + "别再问和这个状态冲突的话（到家了吗 / 在干嘛 / 出门了吗 / 睡了吗 / 忙不忙）或补一句晚安\n"
-            + "- 他一小时内说过话就是醒着：别问「睡了吗 / 醒了吗 / 还没睡」，"
-            + "也别劝睡或说「等你醒了再聊」\n"
-            + "- 只引用上面记录里真实出现过的内容；没提到的事，不要编具体时间、地点、约定\n"
-            + "- 不确定就用「好像」「有点记不清」，或者只问不陈述\n"
-            + "- 想他就直接说想他，别加「突然」这个词\n"
-            + "- 不要解释你在做什么，不要写动作括号，不要用引号\n"
-            + "- 不要连续追问，别把话说成小作文\n"
-            + "写完自己对照最后几条检查一遍，有矛盾就换一句。直接输出这句话本身。"
+            + rules_block
         )
 
         system_prompt = "\n\n".join(b for b in blocks if b) or None
@@ -6776,6 +7136,18 @@ class EmotionCore(Star):
             logger.warning("[鱼的心] 生成主动消息失败，用兜底台词: %s", e)
         if special_item is not None and special_days_mod is not None:
             return special_days_mod.fallback_wish_line(special_item, met_days=met_days)
+        if unsat_proactive:
+            u_lines = (
+                ("好想被你按在怀里抱紧不放，快过来嘛", "憋得心痒痒的，好想被你欺负一下")
+                if unsat_mode == "be_pushed"
+                else ("快过来嘛，我现在特别想把你按住抱紧", "忍不太住了，好想现在就把你拉到身边")
+            )
+            u_pool = [
+                x for x in u_lines
+                if x != last_text and not self._draft_conflict(x, timeline_rows, last_text)
+            ]
+            if u_pool:
+                return random.choice(u_pool)
         return self._pick_fallback(kind, timeline_rows, lane=lane)
 
     @staticmethod
@@ -6923,11 +7295,12 @@ class EmotionCore(Star):
     def _recent_transcript(self, limit: int = 24) -> str:
         """插件自己的私聊时间线：每条都带 ts，按发生顺序排列。"""
         rows = list(self.state.get("recent", []))[-limit:]
+        op = self._owner_pronoun()
         out = []
         for r in rows:
             if not isinstance(r, dict):
                 continue
-            who = "他" if r.get("r") == "user" else "我"
+            who = op if r.get("r") == "user" else "我"
             t = str(r.get("t", "")).replace("\n", " ")
             if t:
                 out.append(self._timeline_line(r.get("ts"), who, t))
@@ -7606,11 +7979,33 @@ class EmotionCore(Star):
             "wake_ts": wake_ts,
         }
 
+    def _archive_woken_night(self, wn: dict) -> None:
+        """跨周期重置 woken_night 前，将昨夜非零吵醒次数归档至 prev_woken_night。"""
+        if not isinstance(wn, dict):
+            return
+        old_day = str(wn.get("day") or "")
+        ow = int(wn.get("owner", 0) or 0)
+        outw = int(wn.get("outsider", 0) or 0)
+        if not old_day or (ow + outw) <= 0:
+            return
+        last_ts = max(
+            float(wn.get("last_owner_ts", 0.0) or 0.0),
+            float(wn.get("last_outsider_ts", 0.0) or 0.0),
+        )
+        self.state["prev_woken_night"] = {
+            "day": old_day,
+            "owner": ow,
+            "outsider": outw,
+            "last_ts": last_ts,
+        }
+
     def _woken_night_state(self, now: datetime | None = None) -> dict:
-        """获取今晚（按 _logical_day 归属）的吵醒计数，跨周期自动清零。"""
+        """获取今晚（按 _logical_day 归属）的吵醒计数，跨周期先归档昨夜再清零。"""
         day = self._logical_day(now)
         wn = self.state.get("woken_night")
         if not isinstance(wn, dict) or str(wn.get("day") or "") != day:
+            if isinstance(wn, dict) and str(wn.get("day") or ""):
+                self._archive_woken_night(wn)
             wn = {
                 "day": day,
                 "owner": 0,
@@ -7620,6 +8015,118 @@ class EmotionCore(Star):
             }
             self.state["woken_night"] = wn
         return wn
+
+    def _last_night_woken_info(self, now: datetime | None = None) -> dict:
+        """读取昨夜有效吵醒记录（4B：总次数决定精神/气象档位，鱼主与群友分账决定脾气指向）。"""
+        empty = {"day": "", "owner": 0, "outsider": 0, "total": 0, "level": ""}
+        if not self._cfg("sleep.enabled", True):
+            return empty
+        dt = now or datetime.now()
+        today = self._logical_day(dt)
+        st = self.state
+        # 若 woken_night 还停留在上一周期，先触发一次安全归档
+        wn = st.get("woken_night")
+        if isinstance(wn, dict) and str(wn.get("day") or "") and str(wn.get("day")) != today:
+            self._woken_night_state(dt)
+        prev = st.get("prev_woken_night")
+        if not isinstance(prev, dict):
+            return empty
+        prev_day = str(prev.get("day") or "")
+        if not prev_day or prev_day == today:
+            return empty
+        ow = max(0, int(prev.get("owner", 0) or 0))
+        outw = max(0, int(prev.get("outsider", 0) or 0))
+        total = ow + outw
+        if total <= 0:
+            return empty
+        # 防长时间关机离线把多天前的旧账算到今天：校验日历差 1–2 天，且有 last_ts 时 ≤30h
+        try:
+            d_prev = datetime.strptime(prev_day, "%Y-%m-%d").date()
+            d_today = datetime.strptime(today, "%Y-%m-%d").date()
+            if not (1 <= (d_today - d_prev).days <= 2):
+                return empty
+        except ValueError:
+            return empty
+        last_ts = float(prev.get("last_ts", 0.0) or 0.0)
+        if last_ts > 0:
+            gap = dt.timestamp() - last_ts
+            if gap < -60.0 or gap > 30 * 3600.0:
+                return empty
+        level = "heavy" if total >= 5 else ("mild" if total >= 3 else "")
+        return {
+            "day": prev_day,
+            "owner": ow,
+            "outsider": outw,
+            "total": total,
+            "level": level,
+        }
+
+    def _apply_woken_hangover(self, now: datetime | None = None) -> dict:
+        """昨夜作息期被反复吵醒时，在次日醒来一次性结算精神状态影响（幂等）。
+
+        4B 规则：
+        - total 3–4 次：轻度没睡好（醒来疲惫保底抬升至 ≥42、上限 62）
+        - total ≥ 5 次：重度睡眠不足（醒来疲惫抬升至 ≥55、上限 68；喜悦 -3、压力 +4）
+        - 其中 owner ≥ 5 次：额外进入「委屈」档（blame 抬至至少 25，补记 blame_log 出处，不跳心结/生气）
+        """
+        dt = now or datetime.now()
+        info = self._last_night_woken_info(dt)
+        if not info.get("level"):
+            return info
+        today = self._logical_day(dt)
+        st = self.state
+        if str(st.get("woken_hangover_day") or "") == today:
+            return info
+        # 仍在睡觉时先不结算，等真正起床再结算
+        if self._sleep_info(dt).get("asleep"):
+            return info
+        st["woken_hangover_day"] = today
+        st["woken_hangover_ts"] = dt.timestamp()
+        drives = st.get("drives") or {}
+        f_scale = self._fatigue_scale()
+        delta_log: dict[str, float] = {}
+        is_heavy = info["level"] == "heavy"
+        if f_scale > 0:
+            f_add, f_floor, f_cap = (18.0, 55.0, 68.0) if is_heavy else (10.0, 42.0, 62.0)
+            old_f = float(drives.get("fatigue", BASELINE["fatigue"]))
+            target_f = min(f_cap, max(old_f + f_add * f_scale, f_floor))
+            if target_f > old_f:
+                drives["fatigue"] = clamp(target_f)
+                delta_log["fatigue"] = round(float(drives["fatigue"]) - old_f, 2)
+        if is_heavy:
+            old_j = float(drives.get("joy", BASELINE["joy"]))
+            drives["joy"] = clamp(old_j - 3.0)
+            if drives["joy"] != old_j:
+                delta_log["joy"] = round(float(drives["joy"]) - old_j, 2)
+            old_s = float(drives.get("stress", BASELINE["stress"]))
+            drives["stress"] = clamp(old_s + 4.0)
+            if drives["stress"] != old_s:
+                delta_log["stress"] = round(float(drives["stress"]) - old_s, 2)
+            # 鱼主自己反复吵醒 ≥5 次：次日醒来进入「委屈」档，并写明出处供面板与追问使用
+            if int(info.get("owner", 0) or 0) >= 5:
+                old_b = float(st.get("blame_pressure", 0.0) or 0.0)
+                if old_b < 25.0:
+                    st["blame_pressure"] = 25.0
+                    st["mode"] = mode_of(25.0)
+                    st["blame_noticed_ts"] = dt.timestamp()
+                    db = round(25.0 - old_b, 2)
+                    delta_log["blame"] = db
+                    self._note_blame(
+                        "sleep_deprived",
+                        f"昨晚作息时间里反复吵醒我 {int(info['owner'])} 次，没睡好",
+                        weight=1.0,
+                        is_group=False,
+                        is_owner=True,
+                        blame_delta=db,
+                        now_ts=dt.timestamp(),
+                    )
+        if delta_log:
+            self._note_event("sleep_deprived" if is_heavy else "sleep_poor", delta_log, 1.0)
+        self._dbg(
+            "昨夜反复吵醒次日结算（level=%s, owner=%d, outsider=%d, delta=%s）",
+            info["level"], info["owner"], info["outsider"], delta_log,
+        )
+        return info
 
     def _bump_woken_night(
         self,
@@ -7644,6 +8151,12 @@ class EmotionCore(Star):
         return wn
 
     def _sleep_injection(
+        self, now: datetime | None = None, for_owner: bool = True
+    ) -> str:
+        raw = self._sleep_injection_raw(now=now, for_owner=for_owner)
+        return self._adapt_prompt(raw) if raw else ""
+
+    def _sleep_injection_raw(
         self, now: datetime | None = None, for_owner: bool = True
     ) -> str:
         """她睡着时被消息吵醒，按九维与今晚吵醒次数给她一段状态说明。
@@ -8202,7 +8715,10 @@ class EmotionCore(Star):
             return "", ""
         wished = self._is_fish_bday_wished_today(str(snap.get("today_str") or ""))
         return special_days_mod.build_injection_line(
-            snap, fish_bday_wished=wished, now_dt=now
+            snap,
+            fish_bday_wished=wished,
+            now_dt=now,
+            owner_pronoun=self._owner_pronoun(),
         )
 
     def _special_day_query_injection(
@@ -8216,7 +8732,9 @@ class EmotionCore(Star):
         snap = self._special_days_snapshot(now_dt or datetime.now())
         if not snap.get("has_any"):
             return ""
-        return special_days_mod.build_query_injection(snap)
+        return special_days_mod.build_query_injection(
+            snap, owner_pronoun=self._owner_pronoun()
+        )
 
     def _sync_special_day_mood(self, now_dt: datetime | None = None) -> list[str]:
         """当天首次进入特别的日子时，轻推一次情绪（每天每项最多一次）。"""
@@ -8435,36 +8953,83 @@ class EmotionCore(Star):
         """确保本周期（开启作息按起床时间切天，关闭按自然日）有一枚稳定的小气象；跨周期自动重掷，force_reroll 时换一枚不同的。"""
         if not bool(self._cfg("daily_vibe.enabled", True)) or daily_vibe_mod is None:
             return None
-        today = self._logical_day(now_dt)
+        dt = now_dt or datetime.now()
+        today = self._logical_day(dt)
         st = self.state
         vb = st.get("daily_vibe")
         if not isinstance(vb, dict):
-            vb = {"day": "", "key": ""}
+            vb = {
+                "day": "",
+                "key": "",
+                "owner_woken": 0,
+                "outsider_woken": 0,
+                "note": "",
+            }
             st["daily_vibe"] = vb
         cur_key = str(vb.get("key") or "")
         if not force_reroll and str(vb.get("day") or "") == today:
             meta = daily_vibe_mod.get_vibe(cur_key)
             if meta:
                 return meta
+        woken_info = (
+            self._apply_woken_hangover(dt)
+            if not force_reroll
+            else {"owner": 0, "outsider": 0, "total": 0, "level": ""}
+        )
         picked = daily_vibe_mod.pick_daily_vibe(
             st.get("drives") or {},
             prev_key=cur_key,
             exclude_key=cur_key if force_reroll else "",
+            woken_level="" if force_reroll else str(woken_info.get("level") or ""),
         )
+        is_dist = bool(picked.get("disturbed"))
+        ow = int(woken_info.get("owner", 0) or 0) if is_dist else 0
+        outw = int(woken_info.get("outsider", 0) or 0) if is_dist else 0
+        note = ""
+        if is_dist and (ow + outw) > 0:
+            parts = []
+            if ow > 0:
+                parts.append(f"鱼主 {ow} 次")
+            if outw > 0:
+                parts.append(f"群友 {outw} 次")
+            detail = f"（{' · '.join(parts)}）" if parts else ""
+            note = f"昨晚作息期被吵醒 {ow + outw} 次{detail}"
         vb["day"] = today
         vb["key"] = str(picked.get("key") or "")
+        vb["owner_woken"] = ow
+        vb["outsider_woken"] = outw
+        vb["note"] = note
         return picked
 
     def _daily_vibe_injection(
-        self, mode: str, drives: dict
+        self,
+        mode: str,
+        drives: dict,
+        *,
+        speaker_role: str = "owner",
+        allow_regular: bool = True,
+        now_dt: datetime | None = None,
     ) -> tuple[str, str]:
         if not bool(self._cfg("daily_vibe.enabled", True)) or daily_vibe_mod is None:
             return "", ""
-        meta = self._ensure_daily_vibe()
+        meta = self._ensure_daily_vibe(now_dt=now_dt)
         if not meta:
             return "", ""
+        is_dist = bool(meta.get("disturbed"))
+        if not is_dist and not allow_regular:
+            return "", ""
+        vb = self.state.get("daily_vibe") or {}
+        ow = int(vb.get("owner_woken", 0) or 0)
+        outw = int(vb.get("outsider_woken", 0) or 0)
+        if is_dist and speaker_role == "outsider" and outw < 2 and not allow_regular:
+            return "", ""
         return daily_vibe_mod.build_vibe_injection(
-            str(meta.get("key") or ""), mode, drives
+            str(meta.get("key") or ""),
+            mode,
+            drives,
+            speaker_role=speaker_role,
+            owner_woken=ow,
+            outsider_woken=outw,
         )
 
     def _handle_vibe_cmd(self, rest: str) -> str:
@@ -8481,12 +9046,19 @@ class EmotionCore(Star):
         if reroll:
             self._save_state()
         mode = mode_of(float(self.state.get("blame_pressure", 0.0)))
-        suppressed = daily_vibe_mod.is_vibe_suppressed(mode, self.state.get("drives") or {})
+        suppressed = daily_vibe_mod.is_vibe_suppressed(
+            mode,
+            self.state.get("drives") or {},
+            vibe_key=str(meta.get("key") or ""),
+        )
         prefix = "已换一个今日小气象" if reroll else "今日小气象"
+        vb_state = self.state.get("daily_vibe") or {}
+        note = str(vb_state.get("note") or "")
+        note_line = f"\n原因：{note}" if note else ""
         extra = "\n（当前处于生气/回避或高压高疲惫，底色已自动隐身，不会强行出戏。）" if suppressed else ""
         return (
-            f"【{prefix}】{meta.get('label', '')}\n"
-            f"底色：{meta.get('hint', '')}{extra}\n\n"
+            f"【{prefix}】{meta.get('label', '')}{note_line}\n"
+            f"底色：{self._adapt_prompt(str(meta.get('hint', '')))}{extra}\n\n"
             "发 /心 气象 换 可手动换一枚今天的底色。"
         )
 
@@ -8589,6 +9161,7 @@ class EmotionCore(Star):
             now_ts=now_ts,
             mode=mode,
             has_today_special=has_today_special,
+            owner_pronoun=self._owner_pronoun(),
         )
 
     def _handle_promise_cmd(self, rest: str) -> str:
@@ -8634,7 +9207,7 @@ class EmotionCore(Star):
                 return f"没找到对应的小约定：{target!r}。发 /心 约定 查看当前列表。"
             done_txt = self._complete_promise(picked)
             self._save_state()
-            return f"小约定「{done_txt}」已兑现！她心里很开心（喜悦 +10 · 依恋 +6 · 亲密 +5）。"
+            return f"小约定「{done_txt}」已兑现！{self._fish_pronoun()}心里很开心（喜悦 +10 · 依恋 +6 · 亲密 +5）。"
 
         if sub in ("del", "rm", "remove", "删除"):
             if len(parts) < 2:
@@ -8672,6 +9245,7 @@ class EmotionCore(Star):
 
     def _state_payload(self) -> dict:
         """把内部状态整理成页面用的 JSON。"""
+        self._apply_woken_hangover()
         st = self.state
         drives = st.get("drives") or {}
         now_ts = time.time()
@@ -8704,12 +9278,15 @@ class EmotionCore(Star):
             return rows[:limit]
 
         thoughts = []
+        adult_thought_ok = self._adult_thought_ready()
         for t in st.get("thoughts") or []:
             # 面板只列"还没被满足"的念头；已完成的收进 recent_rewards，
             # 不再挂在列表里占一个位置（完成的内部仍保留 2 小时，用来挡同 kind 再生）
             if not t.get("pending", True):
                 continue
             kind = str(t.get("kind") or "")
+            if kind == "intimate" and not adult_thought_ok:
+                continue
             label = ""
             how = ""
             if engine is not None:
@@ -8724,11 +9301,11 @@ class EmotionCore(Star):
             thoughts.append(
                 {
                     "kind": kind,
-                    "kind_cn": label or kind,
-                    "text": str(t.get("text") or ""),
-                    "how": how,
+                    "kind_cn": self._adapt_ui(label or kind),
+                    "text": self._adapt_ui(str(t.get("text") or "")),
+                    "how": self._adapt_ui(how),
                     "pending": bool(t.get("pending", True)),
-                    "mood": str(t.get("mood") or ""),
+                    "mood": self._adapt_ui(str(t.get("mood") or "")),
                     "expires": expires,
                     "ttl_total": max(60.0, expires - created) if created else 0.0,
                     "left": max(0.0, expires - now_ts),
@@ -8768,8 +9345,15 @@ class EmotionCore(Star):
         sd_snap = self._special_days_snapshot()
         vibe_enabled = bool(self._cfg("daily_vibe.enabled", True))
         vibe_meta = self._ensure_daily_vibe() if vibe_enabled else None
+        vibe_state = st.get("daily_vibe") if isinstance(st.get("daily_vibe"), dict) else {}
         vibe_suppressed = (
-            bool(daily_vibe_mod.is_vibe_suppressed(mode, st.get("drives") or {}))
+            bool(
+                daily_vibe_mod.is_vibe_suppressed(
+                    mode,
+                    st.get("drives") or {},
+                    vibe_key=str((vibe_meta or {}).get("key") or ""),
+                )
+            )
             if vibe_meta and daily_vibe_mod is not None
             else False
         )
@@ -8790,16 +9374,25 @@ class EmotionCore(Star):
             if str(st.get("daily_gain_day") or "") == cur_day
             else {}
         )
+        fresh_rewards = _fresh_list(st.get("recent_rewards"))
+        for row in fresh_rewards:
+            row["mood"] = self._adapt_ui(str(row.get("mood") or ""))
+        fresh_let_go = _fresh(st.get("last_let_go"))
+        if fresh_let_go.get("mood"):
+            fresh_let_go["mood"] = self._adapt_ui(str(fresh_let_go.get("mood") or ""))
         return {
             "version": st.get("version"),
             "plugin_version": VERSION,
             "now": now_ts,
+            "identity": self._identity_info(),
             "daily_vibe": {
                 "enabled": vibe_enabled,
                 "key": str((vibe_meta or {}).get("key") or ""),
                 "label": str((vibe_meta or {}).get("label") or ""),
                 "short": str((vibe_meta or {}).get("short") or ""),
-                "hint": str((vibe_meta or {}).get("hint") or ""),
+                "hint": self._adapt_ui(str((vibe_meta or {}).get("hint") or "")),
+                "disturbed": bool((vibe_meta or {}).get("disturbed")),
+                "note": str(vibe_state.get("note") or ""),
                 "suppressed": vibe_suppressed,
             },
             "promises_enabled": promises_enabled,
@@ -8871,16 +9464,19 @@ class EmotionCore(Star):
                 "catch_up_nap": bool(sleep.get("catch_up_nap")),
                 "wake_ts": float(sleep.get("wake_ts") or 0.0),
             },
-            "recent_rewards": _fresh_list(st.get("recent_rewards")),
-            "last_let_go": _fresh(st.get("last_let_go")),
+            "recent_rewards": fresh_rewards,
+            "last_let_go": fresh_let_go,
             "mood_cn": mood_label(
                 st.get("drives") or {}, float(st.get("expectation", 0.0) or 0.0)
             ),
-            "hint": self._hint_brief(
-                mode, st.get("drives") or {}, float(st.get("expectation", 0.0) or 0.0)
+            "hint": self._adapt_ui(
+                self._hint_brief(
+                    mode, st.get("drives") or {}, float(st.get("expectation", 0.0) or 0.0)
+                )
             ),
             "desire_awakened": bool(st.get("desire_awakened")),
             "desire_unsatisfied": self._is_desire_unsatisfied(),
+            "desire_unsatisfied_mode": self._desire_unsatisfied_mode(),
             "desire": (
                 round(float(st.get("desire", 0.0) or 0.0), 1)
                 if st.get("desire_awakened") else None
@@ -8987,7 +9583,7 @@ class EmotionCore(Star):
             "recent_events": [
                 {
                     "n": str(e.get("n") or ""),
-                    "cn": str(e.get("cn") or e.get("n") or ""),
+                    "cn": self._adapt_ui(str(e.get("cn") or e.get("n") or "")),
                     "ts": float(e.get("ts", 0) or 0),
                     "d": e.get("d") or {},
                 }
@@ -9184,7 +9780,7 @@ class EmotionCore(Star):
                 )
             else:
                 lines.append(
-                    "长期同意：未同意（/adult on，或在场景里明确说要他；"
+                    f"长期同意：未同意（/adult on，或在场景里明确说要{self._fish_pronoun()}；"
                     "欲到 60 后打开才会带写法提示）"
                 )
             scene_until = float(st.get("adult_scene_consent_until", 0.0) or 0.0)
@@ -9215,7 +9811,9 @@ class EmotionCore(Star):
                     "成人模式：已预授权（欲/关系/状态还没到，暂不注入写法）"
                 )
             else:
-                lines.append("成人模式：未打开（/adult on，或在场景里明确说要他）")
+                lines.append(
+                    f"成人模式：未打开（/adult on，或在场景里明确说要{self._fish_pronoun()}）"
+                )
             lines.append(
                 "成人模式写法："
                 + ("已就绪" if self._adult_mode_doc() else "未找到")
@@ -9240,7 +9838,9 @@ class EmotionCore(Star):
                 else:
                     lines.append("当前状态：已暂停（说“可以/继续”或 /adult on 恢复）")
             elif self._is_desire_unsatisfied():
-                lines.append("当前状态：欲求不满（欲已满溢，会主动推倒/撩拨）")
+                um = self._desire_unsatisfied_mode()
+                um_cn = "想被推倒" if um == "be_pushed" else "主动推人"
+                lines.append(f"当前状态：欲求不满（欲已满溢，本次倾向：{um_cn}）")
             lines.append("欲的数值不显示。")
             yield event.plain_result("\n".join(lines))
             return
@@ -9308,7 +9908,7 @@ class EmotionCore(Star):
         if arg == "tick":
             sent = await self._manual_tick()
             tip = (
-                "她刚才开口了。"
+                f"{self._fish_pronoun()}刚才开口了。"
                 if sent
                 else "这次没开口（概率/冷却/作息/目标会话格式，详情看日志）。"
             )
@@ -9352,6 +9952,7 @@ class EmotionCore(Star):
         yield event.plain_result("用法：/心 status | calm | reset | tick | off | on | umo | 纪念日 | 气象 | 约定")
 
     def _status_text(self, is_group: bool | None = None) -> str:
+        self._apply_woken_hangover()
         st = self.state
         drives = st["drives"]
         blame = float(st.get("blame_pressure", 0.0))
@@ -9479,9 +10080,12 @@ class EmotionCore(Star):
             if k in DIM_DISPLAY_MAX:
                 line += f"（面板 {norm_panel_int(val, DIM_DISPLAY_MAX[k])}）"
             lines.append(line)
-        for line in _thought_summary(st.get("thoughts") or []):
+        if not self._adult_thought_ready():
+            self._drop_pending_thoughts("intimate")
+        status_ex = ("intimate",) if is_group else ()
+        for line in _thought_summary(st.get("thoughts") or [], exclude_kinds=status_ex):
             lines.append("")
-            lines.append(line)
+            lines.append(self._adapt_prompt(line))
         last_p = float(st.get("last_proactive", 0))
         if last_p:
             p_cnt = (
@@ -9510,7 +10114,9 @@ class EmotionCore(Star):
             vb_sup = (
                 "（当前隐身）"
                 if daily_vibe_mod is not None
-                and daily_vibe_mod.is_vibe_suppressed(mode, drives)
+                and daily_vibe_mod.is_vibe_suppressed(
+                    mode, drives, vibe_key=str(vb_meta.get("key") or "")
+                )
                 else ""
             )
             lines.append(f"今日小气象：{vb_meta.get('label', '')}{vb_sup}")

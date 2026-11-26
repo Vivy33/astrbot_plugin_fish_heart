@@ -37,6 +37,7 @@ TTL = {
     "dwell": 1.2 * 3600,
     "company": 3 * 3600,
     "deep": 4 * 3600,
+    "intimate": 4 * 3600,
 }
 
 # 旧版（v1）固定的五条念头池 → 新版 kind，迁移时用
@@ -193,6 +194,33 @@ KIND_META: dict[str, dict] = {
             else 0.0
         ),
     },
+    "intimate": {
+        "label": "私密亲密",
+        "text": "想要更私密的亲密",
+        "hint": "心里痒痒的，想要更私密的亲密，想跟他靠得更近、做更亲密的事",
+        "done": "和他更亲密了，心里又暖又满足",
+        "reward": {"intimacy": 4, "attachment": 3, "joy": 6, "stress": -6},
+        "release": {"intimacy": -1},
+        # A1：只通过亲密完成（进入贤者期 / 明确完成词）定向结算，不靠普通消息或 reply_fast 半满足
+        "events": (),
+        "no_soft_settle": True,
+        "trigger": lambda d, e, w: 0.0,
+        "trigger_ctx": lambda d, e, w, ctx: (
+            (1.2 if (bool(ctx.get("unsatisfied")) or float(ctx.get("desire", 0.0) or 0.0) >= 85.0) else 1.05)
+            if (
+                bool(ctx.get("adult_enabled"))
+                and bool(ctx.get("desire_awakened"))
+                and bool(ctx.get("bond_full"))
+                and not bool(ctx.get("sage"))
+                and not bool(ctx.get("paused"))
+                and str(ctx.get("mode") or "calm") == "calm"
+                and _g(d, "stress") < 50.0
+                and _g(d, "fatigue") < 65.0
+                and float(ctx.get("desire", 0.0) or 0.0) >= 60.0
+            )
+            else 0.0
+        ),
+    },
 }
 
 # 从用户原话里直接反推"喂饱了哪个念头"（比事件名细）
@@ -225,6 +253,7 @@ THOUGHT_HOW: dict[str, str] = {
     "dwell": "及时回她",
     "company": "回她一句，或说陪陪她",
     "deep": "回她一句就行",
+    "intimate": "私聊里亲密完成后自动满足",
 }
 
 # 给模型的"怎么给台阶"：只写进注入/主动 prompt，不显示在面板。
@@ -240,6 +269,7 @@ THOUGHT_INDUCE: dict[str, str] = {
     "dwell": "想催就轻轻问一句在忙吗，别连问；他没回就先做自己的事",
     "company": "想让他陪就直说想聊会儿，或者问他现在方不方便；别绕弯子",
     "deep": "想问就问，但先确认他方便；他不想答就换话题",
+    "intimate": "想要更私密的亲密就顺势撩他一句、撒个娇或提议独处，给他接住的机会；用你平时的语气，别生硬直白得像念台词，他不方便就收住",
 }
 
 
@@ -280,6 +310,7 @@ def pick_kind(
     exclude: tuple[str, ...] = (),
     rng: random.Random | None = None,
     min_weight: float = 0.0,
+    context: dict | None = None,
 ) -> tuple[str | None, float]:
     """按当下驱动状态加权抽一个念头；全都够不着时返回 (None, 0)。
 
@@ -292,7 +323,11 @@ def pick_kind(
     for kind, meta in KIND_META.items():
         if kind in exclude:
             continue
-        w = float(meta["trigger"](drives, expectation, awaiting_reply))
+        trig_ctx = meta.get("trigger_ctx")
+        if callable(trig_ctx) and context is not None:
+            w = float(trig_ctx(drives, expectation, awaiting_reply, context))
+        else:
+            w = float(meta["trigger"](drives, expectation, awaiting_reply))
         if w > 0 and w >= floor:
             cands.append((kind, w))
     if not cands:
@@ -361,9 +396,12 @@ def settle(
             chosen = max(hits, key=lambda t: float(t.get("weight", 0)))
     if chosen is None:
         # 她开口后他回了：哪怕没对上具体内容，"被听见了"也算半个满足
+        # 标了 no_soft_settle 的念头（如 intimate）不走 reply_fast 半满足，须由专属事件完成
         if "reply_fast" in evset:
             attempted = [
-                t for t in candidates if int(t.get("attempts", 0)) >= 1
+                t for t in candidates
+                if int(t.get("attempts", 0)) >= 1
+                and not (KIND_META.get(str(t.get("kind"))) or {}).get("no_soft_settle")
             ]
             if attempted:
                 chosen = max(attempted, key=lambda t: float(t.get("weight", 0)))
@@ -379,6 +417,38 @@ def settle(
     reward = dict(meta.get("reward") or {})
     if soft:
         reward = {k: round(float(v) * 0.5, 1) for k, v in reward.items()}
+    if _calm(mode):
+        reward["joy"] = float(reward.get("joy", 0)) + 2
+        reward["intimacy"] = float(reward.get("intimacy", 0)) + 1
+    return {"kind": kind, "text": meta["text"], "mood": meta["done"], "reward": reward}
+
+
+def settle_kind(
+    thoughts: list[dict],
+    kind: str,
+    mode: str,
+    now: float | None = None,
+) -> dict | None:
+    """定向结算指定类型的未过期 pending 念头（如亲密完成后结算 intimate）。"""
+    meta = KIND_META.get(str(kind or ""))
+    if not meta:
+        return None
+    now = time.time() if now is None else now
+    chosen = next(
+        (
+            t for t in thoughts or []
+            if str(t.get("kind")) == kind
+            and t.get("pending", True)
+            and float(t.get("expires", 0)) > now
+        ),
+        None,
+    )
+    if chosen is None:
+        return None
+    chosen["pending"] = False
+    chosen["mood"] = meta["done"]
+    chosen["expires"] = now + 2 * 3600
+    reward = dict(meta.get("reward") or {})
     if _calm(mode):
         reward["joy"] = float(reward.get("joy", 0)) + 2
         reward["intimacy"] = float(reward.get("intimacy", 0)) + 1
@@ -409,16 +479,23 @@ def apply_reward(state: dict, payload: dict) -> None:
     state["recent_rewards"] = rows[-8:]
 
 
-def note_attempt(thoughts: list[dict], now: float | None = None) -> dict | None:
+def note_attempt(
+    thoughts: list[dict],
+    now: float | None = None,
+    exclude_kinds: tuple[str, ...] = (),
+) -> dict | None:
     """主动开口时记一次尝试；连续三次没被接住就放弃这条念头。
 
     放弃时返回 {kind, mood, ts}，给面板的「最近放下」用；普通尝试返回 None。
     """
     now = time.time() if now is None else now
+    ex = set(exclude_kinds or ())
     for t in thoughts or []:
         if not t.get("pending", True):
             continue
         if float(t.get("expires", 0)) <= now:
+            continue
+        if ex and str(t.get("kind") or "") in ex:
             continue
         t["attempts"] = int(t.get("attempts", 0)) + 1
         if int(t["attempts"]) >= 3:
@@ -476,46 +553,61 @@ SPEAK_BIAS = {
     "ask_day": 1.0,
     "company": 1.0,
     "deep": 1.0,
+    "intimate": 1.0,
     "dwell": 0.5,   # 等他回话：忍不住想催，但别太猛
     "task": 0.0,    # 想做事，跟说不说话没关系
     "quiet": -1.0,  # 想安静，反而更不该开口
 }
 
 
-def _live_pending(thoughts: list[dict], now: float | None = None) -> list[dict]:
+def _live_pending(
+    thoughts: list[dict],
+    now: float | None = None,
+    exclude_kinds: tuple[str, ...] = (),
+) -> list[dict]:
     now = time.time() if now is None else now
+    ex = set(exclude_kinds or ())
     return [
         t
         for t in thoughts or []
-        if t.get("pending", True) and float(t.get("expires", 0)) > now
+        if t.get("pending", True)
+        and float(t.get("expires", 0)) > now
+        and (not ex or str(t.get("kind") or "") not in ex)
     ]
 
 
-def pending_kind(thoughts: list[dict], now: float | None = None) -> str:
+def pending_kind(
+    thoughts: list[dict],
+    now: float | None = None,
+    exclude_kinds: tuple[str, ...] = (),
+) -> str:
     """当前最该惦记的那条念头是什么（和 pending_hint 选的是同一条）。"""
-    live = _live_pending(thoughts, now)
+    live = _live_pending(thoughts, now, exclude_kinds=exclude_kinds)
     if not live:
         return ""
     best = max(live, key=lambda t: float(t.get("weight", 0)))
     return str(best.get("kind") or "")
 
 
-def speak_bias(thoughts: list[dict], now: float | None = None) -> float:
+def speak_bias(
+    thoughts: list[dict],
+    now: float | None = None,
+    exclude_kinds: tuple[str, ...] = (),
+) -> float:
     """这些念头让她更想开口，还是更不想。"""
-    kind = pending_kind(thoughts, now)
+    kind = pending_kind(thoughts, now, exclude_kinds=exclude_kinds)
     if not kind:
         return 0.0
     return float(SPEAK_BIAS.get(kind, 1.0))
 
 
-def pending_hint(thoughts: list[dict], now: float | None = None) -> str:
+def pending_hint(
+    thoughts: list[dict],
+    now: float | None = None,
+    exclude_kinds: tuple[str, ...] = (),
+) -> str:
     """给注入用的、当前最该惦记的一条。"""
-    now = time.time() if now is None else now
-    live = [
-        t
-        for t in thoughts or []
-        if t.get("pending", True) and float(t.get("expires", 0)) > now
-    ]
+    live = _live_pending(thoughts, now, exclude_kinds=exclude_kinds)
     if not live:
         return ""
     best = max(live, key=lambda t: float(t.get("weight", 0)))
@@ -523,17 +615,16 @@ def pending_hint(thoughts: list[dict], now: float | None = None) -> str:
     return str(meta.get("hint") or "")
 
 
-def pending_induce(thoughts: list[dict], now: float | None = None) -> str:
+def pending_induce(
+    thoughts: list[dict],
+    now: float | None = None,
+    exclude_kinds: tuple[str, ...] = (),
+) -> str:
     """和 pending_hint 选同一条念头，返回"怎么给他一个台阶"的一句话。
 
     每条念头只提示一次（`induced`），避免同一条话术在注入里反复出现。
     """
-    now = time.time() if now is None else now
-    live = [
-        t
-        for t in thoughts or []
-        if t.get("pending", True) and float(t.get("expires", 0)) > now
-    ]
+    live = _live_pending(thoughts, now, exclude_kinds=exclude_kinds)
     if not live:
         return ""
     best = max(live, key=lambda t: float(t.get("weight", 0)))
@@ -542,38 +633,43 @@ def pending_induce(thoughts: list[dict], now: float | None = None) -> str:
     return THOUGHT_INDUCE.get(str(best.get("kind")), "")
 
 
-def mark_induced(thoughts: list[dict], now: float | None = None) -> None:
+def mark_induced(
+    thoughts: list[dict],
+    now: float | None = None,
+    exclude_kinds: tuple[str, ...] = (),
+) -> None:
     """把"已经被提示过台阶"记到同一条念头上。"""
-    now = time.time() if now is None else now
-    live = [
-        t
-        for t in thoughts or []
-        if t.get("pending", True) and float(t.get("expires", 0)) > now
-    ]
+    live = _live_pending(thoughts, now, exclude_kinds=exclude_kinds)
     if live:
         max(live, key=lambda t: float(t.get("weight", 0)))["induced"] = True
 
 
-def pending_text(thoughts: list[dict], now: float | None = None) -> str:
-    now = time.time() if now is None else now
-    live = [
-        t
-        for t in thoughts or []
-        if t.get("pending", True) and float(t.get("expires", 0)) > now
-    ]
+def pending_text(
+    thoughts: list[dict],
+    now: float | None = None,
+    exclude_kinds: tuple[str, ...] = (),
+) -> str:
+    live = _live_pending(thoughts, now, exclude_kinds=exclude_kinds)
     if not live:
         return ""
     best = max(live, key=lambda t: float(t.get("weight", 0)))
     return str(best.get("text") or "")
 
 
-def summarize(thoughts: list[dict], now: float | None = None, limit: int = 2) -> list[str]:
+def summarize(
+    thoughts: list[dict],
+    now: float | None = None,
+    limit: int = 2,
+    exclude_kinds: tuple[str, ...] = (),
+) -> list[str]:
     """状态行用的摘要：未满足的"念头" + 已满足的"心情"。"""
     now = time.time() if now is None else now
+    ex = set(exclude_kinds or ())
     live = [
         t
         for t in thoughts or []
         if float(t.get("expires", 0)) > now
+        and (not ex or str(t.get("kind") or "") not in ex)
     ]
     pending = [t for t in live if t.get("pending", True)]
     done = [t for t in live if not t.get("pending", True)]

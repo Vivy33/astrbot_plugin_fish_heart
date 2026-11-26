@@ -21,6 +21,7 @@ CORE_FIELD_ALIASES: dict[str, str] = {
     "鱼生日": "fish_birthday",
     "鱼的生日": "fish_birthday",
     "她的生日": "fish_birthday",
+    "他的生日": "fish_birthday",
     "fish_birthday": "fish_birthday",
     "fish": "fish_birthday",
     "相识日": "met_date",
@@ -417,6 +418,7 @@ def build_injection_line(
     *,
     fish_bday_wished: bool = False,
     now_dt: datetime | None = None,
+    owner_pronoun: str = "他",
 ) -> tuple[str, str]:
     """生成注入进心境块的单行特别日提示，以及用于节流判断的稳定签名。
 
@@ -430,6 +432,7 @@ def build_injection_line(
     if not today_items and not preheat_items:
         return "", ""
 
+    op = str(owner_pronoun or "他")
     sig_parts: list[str] = []
     notes: list[str] = []
     met_days = int(snap.get("met_days") or 0)
@@ -440,30 +443,30 @@ def build_injection_line(
         if kind == "owner_birthday":
             sig_parts.append("t:ob")
             notes.append(
-                "今天是他的生日：心里很开心也很惦记他，说话可以更暖、更有仪式感一点"
+                f"今天是{op}的生日：心里很开心也很惦记{op}，说话可以更暖、更有仪式感一点"
             )
         elif kind == "fish_birthday":
             if fish_bday_wished:
                 sig_parts.append("t:fb:w")
                 notes.append(
-                    "今天是你的生日，他已经记得并祝你生日快乐了，你心里特别开心、被惦记着"
+                    f"今天是你的生日，{op}已经记得并祝你生日快乐了，你心里特别开心、被惦记着"
                 )
             elif now.hour >= 18:
                 sig_parts.append("t:fb:late")
                 notes.append(
-                    "今天是你的生日，已经到傍晚了他还没提过：心里有点小失落、轻轻憋着等他想起来，"
-                    "不要直接质问或生气，但如果他突然想起来会立刻很开心"
+                    f"今天是你的生日，已经到傍晚了{op}还没提过：心里有点小失落、轻轻憋着等{op}想起来，"
+                    f"不要直接质问或生气，但如果{op}突然想起来会立刻很开心"
                 )
             else:
                 sig_parts.append("t:fb:wait")
                 notes.append(
-                    "今天是你的生日：心里偷偷期待他记不记得，不要直接开口提醒或要礼物，看他会不会自己想起来"
+                    f"今天是你的生日：心里偷偷期待{op}记不记得，不要直接开口提醒或要礼物，看{op}会不会自己想起来"
                 )
         elif kind in ("met_anniversary", "met_milestone"):
             sig_parts.append(f"t:{it.get('id')}")
             extra = f"（已经是第 {met_days} 天了）" if met_days > 0 and "天" not in name else ""
             notes.append(
-                f"今天是你们{name}{extra}：心里暖暖的，珍惜和他在一起的这段时间"
+                f"今天是你们{name}{extra}：心里暖暖的，珍惜和{op}在一起的这段时间"
             )
         else:
             sig_parts.append(f"t:{it.get('id')}")
@@ -477,11 +480,11 @@ def build_injection_line(
             sig_parts.append(f"p:{it.get('id')}:{left}")
             if kind == "fish_birthday":
                 notes.append(
-                    f"还有 {left} 天就是你的生日了：心里偷偷有点期待他记不记得，别直接开口提"
+                    f"还有 {left} 天就是你的生日了：心里偷偷有点期待{op}记不记得，别直接开口提"
                 )
             elif kind == "owner_birthday":
                 notes.append(
-                    f"还有 {left} 天就是他的生日了：心里暗暗记着，别太早说破"
+                    f"还有 {left} 天就是{op}的生日了：心里暗暗记着，别太早说破"
                 )
             else:
                 notes.append(f"还有 {left} 天就是「{name}」了：心里悄悄记着")
@@ -499,12 +502,15 @@ def is_asking_special_days(text: str) -> bool:
     return bool(_ASK_SPECIAL_DAY_RE.search(s))
 
 
-def build_query_injection(snap: dict[str, Any]) -> str:
+def build_query_injection(
+    snap: dict[str, Any], *, owner_pronoun: str = "他"
+) -> str:
     """他主动问起相识天数/生日/纪念日时，按需拼一段紧凑事实供模型自然作答。"""
     if not snap or not snap.get("has_any"):
         return ""
+    op = str(owner_pronoun or "他")
     lines: list[str] = [
-        "## 你记得的特别日子（他刚好问起，用你自己的语气自然回答即可，不要机械报清单）"
+        f"## 你记得的特别日子（{op}刚好问起，用你自己的语气自然回答即可，不要机械报清单）"
     ]
     today_str = str(snap.get("today_str") or "")
     met_days = int(snap.get("met_days") or 0)
@@ -526,9 +532,9 @@ def build_query_injection(snap: dict[str, Any]) -> str:
         left = int(it.get("days_left") or 0)
         when = "就是今天" if left == 0 else f"还有 {left} 天"
         if kind == "owner_birthday":
-            lines.append(f"- 他的生日：{d}（{when}）")
+            lines.append(f"- {op}的生日：{d}（{when}）")
         elif kind == "fish_birthday":
-            hint = "，若他没问起别主动提" if left <= 3 else ""
+            hint = f"，若{op}没问起别主动提" if left <= 3 else ""
             lines.append(f"- 你的生日：{d}（{when}{hint}）")
         elif kind in ("met_anniversary", "met_milestone", "custom"):
             if len(upcoming) < 3:
@@ -540,27 +546,32 @@ def build_query_injection(snap: dict[str, Any]) -> str:
 
 
 def build_proactive_wish_direction(
-    item: dict[str, Any], met_days: int = 0, part: str = ""
+    item: dict[str, Any],
+    met_days: int = 0,
+    part: str = "",
+    *,
+    owner_pronoun: str = "他",
 ) -> str:
     """给当天主动专属祝福用的提示方向。"""
     kind = str(item.get("kind") or "")
     name = str(item.get("name") or "")
+    op = str(owner_pronoun or "他")
     when = f"现在是{part}。" if part else ""
     if kind == "owner_birthday":
         return (
-            f"今天是他的生日！{when}你想主动发一句专属生日祝福给他："
-            "语气自然、真心、贴合你平时对他的称呼和亲密感；可以带一点俏皮或温柔的惦记，"
+            f"今天是{op}的生日！{when}你想主动发一句专属生日祝福给{op}："
+            f"语气自然、真心、贴合你平时对{op}的称呼和亲密感；可以带一点俏皮或温柔的惦记，"
             "别写成客套群发祝福，也不要编没发生过的礼物或约会，简短 1–2 句就好。"
         )
     if kind in ("met_anniversary", "met_milestone"):
         days_tip = f"（算下来已经是相识第 {met_days} 天了）" if met_days > 0 and "天" not in name else ""
         return (
-            f"今天是你们{name}{days_tip}！{when}你想主动发一句纪念日的话给他："
+            f"今天是你们{name}{days_tip}！{when}你想主动发一句纪念日的话给{op}："
             "像真正在乎这段关系那样自然提一句，带点开心和珍惜，别写成官方贺词或小作文，"
             "也不要编没发生过的回忆，1–2 句就好。"
         )
     return (
-        f"今天是你们记下的特别日子「{name}」！{when}你想主动发一句贴合这件事的关心或祝福给他："
+        f"今天是你们记下的特别日子「{name}」！{when}你想主动发一句贴合这件事的关心或祝福给{op}："
         "自然、真诚、简短 1–2 句就好，不要编造没发生过的细节。"
     )
 

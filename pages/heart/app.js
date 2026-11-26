@@ -40,12 +40,59 @@
   const KIND_CN = {
     praise: "想被夸", miss: "想你", hug: "想抱抱", talk: "想找你说话",
     ask_day: "问你今天", task: "想找点事做", quiet: "想安静会儿",
-    dwell: "等你回话", company: "想让你陪", deep: "走心",
+    dwell: "等你回话", company: "想让你陪", deep: "走心", intimate: "私密亲密",
   };
 
-  /** 展示层统一把"他"换成"你"（避开"其他"这类词），引擎里的原文不动 */
+  let IDENTITY = {
+    fish_gender: "female",
+    owner_gender: "male",
+    fish_pronoun: "她",
+    owner_pronoun: "他",
+    fish_label: "女",
+    owner_label: "男",
+    fish_symbol: "♀",
+    owner_symbol: "♂",
+  };
+  let HAS_IDENTITY = false;
+
+  const P = () => IDENTITY.fish_pronoun || "她";
+
+  function applyIdentity(id) {
+    if (id && typeof id === "object") {
+      HAS_IDENTITY = true;
+      IDENTITY = {
+        fish_gender: String(id.fish_gender || "female"),
+        owner_gender: String(id.owner_gender || "male"),
+        fish_pronoun: String(id.fish_pronoun || "她"),
+        owner_pronoun: String(id.owner_pronoun || "他"),
+        fish_label: String(id.fish_label || "女"),
+        owner_label: String(id.owner_label || "男"),
+        fish_symbol: String(id.fish_symbol || "♀"),
+        owner_symbol: String(id.owner_symbol || "♂"),
+      };
+    }
+    const root = document.documentElement;
+    root.dataset.fishGender = IDENTITY.fish_gender;
+    root.dataset.ownerGender = IDENTITY.owner_gender;
+    const p = P();
+    const errTitle = $("errorTitle");
+    if (errTitle) errTitle.textContent = `读不到${p}的状态`;
+    const thoughtEmpty = $("thoughtEmpty");
+    if (thoughtEmpty) thoughtEmpty.textContent = `${p}这会儿什么都没惦记。`;
+    const btnTick = $("btnTick");
+    if (btnTick) btnTick.textContent = `替${p}跳一次心跳`;
+    const injectEmpty = $("injectEmpty");
+    if (injectEmpty) {
+      injectEmpty.textContent =
+        `还没有会话报到过 —— 去私聊跟${p}说一句话，${p}注入心境后这里就会记下是哪个会话、什么时候。`;
+    }
+  }
+
+  /** 展示层统一把"他"换成"你"（仅旧后端未传 identity 时的兼容回退；新后端已分清鱼与鱼主） */
   function toYou(s) {
-    return String(s || "").replace(/(?<!其)他/g, "你");
+    const raw = String(s || "");
+    if (HAS_IDENTITY) return raw;
+    return raw.replace(/(?<!其)他/g, "你");
   }
 
   const $ = (id) => document.getElementById(id);
@@ -405,29 +452,30 @@
     });
 
     // 她"现在为什么安静 / 能不能开口"——把三个闸门直白讲出来
+    const p = P();
     let readiness;
     let readinessHidden = false; // 顶部四块已经写了同一件事时，这句不再重复
     if (!d.enabled) {
-      readiness = "总开关已关闭，她不会主动开口。";
+      readiness = `总开关已关闭，${p}不会主动开口。`;
     } else if (d.mode === "shut") {
       const pct = Math.round(Number(cfg.silent_next_p ?? 0) * 100);
       const cap = Number(cfg.silent_cap || 7);
       readiness = cfg.shut_enabled === false
-        ? "她在回避：主动说话被冻结，但「已读不回」已关闭，你说话她照常回。"
-        : `她在回避：主动说话被冻结；私聊 ${d.silent_streak || 0}/${cap} 条（这一条回 ${pct}%）、群聊 ${d.silent_streak_group || 0}/${cap} 条不回。`;
+        ? `${p}在回避：主动说话被冻结，但「已读不回」已关闭，你说话${p}照常回。`
+        : `${p}在回避：主动说话被冻结；私聊 ${d.silent_streak || 0}/${cap} 条（这一条回 ${pct}%）、群聊 ${d.silent_streak_group || 0}/${cap} 条不回。`;
     } else if (d.sleep?.asleep) {
       readiness = d.sleep.catch_up_nap
-        ? `她通宵熬不住了，正在补睡（预计 ${d.sleep.wake} 醒），醒来后才可能开口。`
-        : `她睡着了（${d.sleep.bedtime}-${d.sleep.wake}${d.sleep.oversleep ? "，顺延起床" : (d.sleep.stay_up ? "，今晚熬夜" : "")}），${d.sleep.wake} 之后才可能开口。`;
+        ? `${p}通宵熬不住了，正在补睡（预计 ${d.sleep.wake} 醒），醒来后才可能开口。`
+        : `${p}睡着了（${d.sleep.bedtime}-${d.sleep.wake}${d.sleep.oversleep ? "，顺延起床" : (d.sleep.stay_up ? "，今晚熬夜" : "")}），${d.sleep.wake} 之后才可能开口。`;
     } else if (!proactiveOn) {
-      readiness = "主动说话已关闭；你说话她会回，但不会主动开口。";
+      readiness = `主动说话已关闭；你说话${p}会回，但不会主动开口。`;
     } else if (outOfWindow) {
       readiness = `当前不在固定主动时段（${cfg.window_start || "18:00"}-${cfg.window_end || "22:00"}）内，到了时间段才会主动开口。`;
     } else if (d.mode === "angry") {
       const who = topAngerTarget(d.anger_targets);
-      const base = `她在生气${who ? `（对 ${who.label}）` : ""}：还会回你`;
+      const base = `${p}在生气${who ? `（对 ${who.label}）` : ""}：还会回你`;
       if (!limit) {
-        readiness = `${base}；每日主动次数是 0，她不会主动开口；语气会冷，先道歉/说清楚比只哄有用。`;
+        readiness = `${base}；每日主动次数是 0，${p}不会主动开口；语气会冷，先道歉/说清楚比只哄有用。`;
       } else if (count >= limit) {
         readiness = `${base}；今天的 ${limit} 次主动已经用完了，但回复时仍会冷；先道歉/说清楚比只哄有用。`;
       } else if (remain > 0) {
@@ -436,7 +484,7 @@
         readiness = `${base}，也可能主动开口；语气会冷，先道歉/说清楚比只哄有用。`;
       }
     } else if (!limit) {
-      readiness = "每日主动次数是 0，她不会主动开口。";
+      readiness = `每日主动次数是 0，${p}不会主动开口。`;
     } else if (count >= limit) {
       readiness = `今天的 ${limit} 次已经用完了，明天再来。`;
     } else if (remain > 0) {
@@ -444,7 +492,7 @@
       readiness = `冷却中，还要等 ${fmtSpan(remain)}。`;
       readinessHidden = true;
     } else {
-      readiness = "随时可能开口 —— 取决于她的心情，和那一次概率。";
+      readiness = `随时可能开口 —— 取决于${p}的心情，和那一次概率。`;
     }
     const readinessBox = $("readiness");
     readinessBox.textContent = readiness;
@@ -493,7 +541,13 @@
     $("desireFill").style.width = `${value}%`;
     const status = [];
     if (d.desire_adult_status) status.push(d.desire_adult_status);
-    if (d.desire_unsatisfied) status.push("欲求不满 · 想主动推倒你");
+    if (d.desire_unsatisfied) {
+      status.push(
+        d.desire_unsatisfied_mode === "be_pushed"
+          ? "欲求不满 · 憋不住想被你推倒"
+          : "欲求不满 · 憋不住想推倒你",
+      );
+    }
     if (d.desire_bond_full === false) status.push("关系未满，正在退潮");
     if (d.desire_satiated) status.push("饱和中 · 收益减半");
     $("desireStatus").textContent = status.join(" · ");
@@ -619,7 +673,7 @@
       const when = m.ts ? fmtAgo(m.ts) : "此前";
       const who = document.createElement("span");
       who.className = "who";
-      who.textContent = `${m.r === "bot" ? "她" : "你"} · ${when}`;
+      who.textContent = `${m.r === "bot" ? P() : "你"} · ${when}`;
       li.appendChild(who);
       if (quote) {
         const qEl = document.createElement("span");
@@ -694,7 +748,7 @@
     tagBadge.title = stuck
       ? "责怪已经停在 40（心结），不会再自己往下掉：哄/道歉，或 /心 calm 才能解"
       : who
-        ? `她在生 ${who.label} 的气（责怪贡献 ${Math.round(who.blame || 0)}）；对其他人只是委屈/难受`
+        ? `${P()}在生 ${who.label} 的气（责怪贡献 ${Math.round(who.blame || 0)}）；对其他人只是委屈/难受`
         : `责怪档：${m.cn}${mode === "calm" ? "（没在生气）" : ""}`;
     $("modeBadge").dataset.mode = mode;
   }
@@ -765,16 +819,26 @@
     }
   }
 
-  function renderSpecialDays(sd, vibe) {
+  function renderSpecialDays(sd, vibe, identity) {
     const box = $("specialStrip");
     if (!box) return;
     box.replaceChildren();
     const pills = [];
+    const id = (identity && typeof identity === "object") ? identity : IDENTITY;
+    pills.push({
+      text: `鱼 ${id.fish_symbol || "♀"}${id.fish_pronoun || "她"} · 鱼主 ${id.owner_symbol || "♂"}${id.owner_pronoun || "他"}`,
+      cls: "special-pill identity",
+      title: `性别设定：鱼（${id.fish_label || "女"}·${id.fish_pronoun || "她"}）／鱼主（${id.owner_label || "男"}·${id.owner_pronoun || "他"}），可在插件配置页修改`,
+    });
     if (vibe && vibe.enabled && vibe.label) {
-      const tip = (vibe.hint || "") + (vibe.suppressed ? "（当前情绪或压力下暂隐身）" : "");
+      const note = vibe.note ? `${vibe.note} · ` : "";
+      const tip = note + (vibe.hint || "") + (vibe.suppressed ? "（当前情绪或压力下暂隐身）" : "");
+      const clsParts = ["special-pill", "vibe"];
+      if (vibe.disturbed) clsParts.push("disturbed");
+      if (vibe.suppressed) clsParts.push("muted");
       pills.push({
         text: `今日气象 · ${vibe.label}`,
-        cls: vibe.suppressed ? "special-pill vibe muted" : "special-pill vibe",
+        cls: clsParts.join(" "),
         title: tip,
       });
     }
@@ -840,18 +904,19 @@
   }
 
   function render(d) {
+    applyIdentity(d.identity);
     applyMode(d.mode, d.mind_knot, d.anger_targets, d.mode_tag_cn);
     document.body.dataset.mode = d.mode;
 
     $("modeBadge").textContent = moodText(d);
     $("modeBadge").title =
-      `她的心情：${moodText(d)}；外圈颜色按责怪档：${MODES[d.mode]?.cn || d.mode}`;
+      `${P()}的心情：${moodText(d)}；外圈颜色按责怪档：${MODES[d.mode]?.cn || d.mode}`;
     const ver = d.plugin_version ? `v${d.plugin_version} · ` : "";
     // 心情和责怪档已经在两枚徽章上；副标题只留数值，避免同一句里再说一遍。
     $("subtitle").textContent =
       `${ver}期待 ${Math.round(d.expectation)} · 责怪 ${Math.round(d.blame)}`;
     $("tickHint").textContent = `心跳 ${fmtAgo(d.last_tick)}`;
-    guard("特别的日子", () => renderSpecialDays(d.special_days, d.daily_vibe));
+    guard("特别的日子", () => renderSpecialDays(d.special_days, d.daily_vibe, d.identity));
 
     const hint = d.hint || "";
     let blameText = "";
@@ -958,6 +1023,10 @@
       const cfg = (res && res.data && res.data.config) || {};
       const tickLimit = Number(cfg.daily_limit ?? 1);
       const tickCount = Number((res && res.data && res.data.proactive_count) || 0);
+      if (res && res.data && res.data.identity) {
+        applyIdentity(res.data.identity);
+      }
+      const p = P();
       if (res && res.data && res.data.enabled === false) {
         toast("总开关已关闭，这次只跳了心跳");
       } else if (cfg.proactive_enabled === false) {
@@ -967,9 +1036,9 @@
       } else if (tickLimit > 0 && tickCount >= tickLimit) {
         toast("今天的主动次数已经用完了，这次只跳了心跳");
       } else if (res && res.data && res.data.sleep?.asleep) {
-        toast("她睡着了，这次只跳了心跳");
+        toast(`${p}睡着了，这次只跳了心跳`);
       } else if (res && res.data && res.data.mode === "shut") {
-        toast("她在回避，主动说话被冻结，这次只跳了心跳");
+        toast(`${p}在回避，主动说话被冻结，这次只跳了心跳`);
       } else if (
         cfg.schedule_mode === "fixed_window"
         && cfg.fixed_window_valid
@@ -977,7 +1046,7 @@
       ) {
         toast(`当前不在固定主动时段（${cfg.window_start || "18:00"}-${cfg.window_end || "22:00"}）内，这次只跳了心跳`);
       } else {
-        toast(sent ? "她刚开口了，去看看消息" : "这次没开口（概率/冷却/目标会话格式，详情看日志）");
+        toast(sent ? `${p}刚开口了，去看看消息` : "这次没开口（概率/冷却/目标会话格式，详情看日志）");
       }
       await load();
     } catch (e) {

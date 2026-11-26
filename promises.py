@@ -276,6 +276,7 @@ def build_promise_injection(
     mode: str = "calm",
     has_today_special: bool = False,
     min_age_hours: float = 18.0,
+    owner_pronoun: str = "他",
 ) -> tuple[str, str]:
     """生成温和的单行小约定提醒（仅在日常档、无当天特别日、且约定记下满 18 小时后）。"""
     if str(mode or "calm") != "calm" or has_today_special:
@@ -296,9 +297,10 @@ def build_promise_injection(
     age_days = max(1, int((now - float(picked["ts"])) // 86400))
     age_str = "昨天" if age_days == 1 else f"{age_days} 天前"
     txt = str(picked["text"]).strip()
+    op = str(owner_pronoun or "他")
     sig = f"{txt[:12]}:{age_days}"
     line = (
         f"心里记着一个小约定：「{txt}」（{age_str}记下的）；"
-        "聊到附近可以顺嘴轻轻提一句，如果他已经做完或正在做就顺势开心接住，别反复催。"
+        f"聊到附近可以顺嘴轻轻提一句，如果{op}已经做完或正在做就顺势开心接住，别反复催。"
     )
     return sig, line

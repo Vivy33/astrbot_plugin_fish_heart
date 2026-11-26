@@ -106,6 +106,8 @@ body::before {
 .aurora i:nth-child(1) { width: 44vw; height: 44vw; left: -6vw; top: -8vw; background: var(--mode); opacity: 0.5; }
 .aurora i:nth-child(2) { width: 36vw; height: 36vw; right: 2vw; top: 8vh; background: #6366f1; opacity: 0.32; animation-delay: -9s; }
 .aurora i:nth-child(3) { width: 30vw; height: 30vw; left: 32vw; bottom: -6vw; background: #ec4899; opacity: 0.22; animation-delay: -17s; }
+[data-fish-gender="male"] .aurora i:nth-child(3) { background: #38bdf8; }
+[data-fish-gender="neutral"] .aurora i:nth-child(3) { background: #a78bfa; }
 
 @keyframes drift {
   0%, 100% { transform: translate3d(0, 0, 0) scale(1); }
@@ -601,11 +603,51 @@ body::before {
   background: rgba(14, 116, 144, 0.32);
   border-color: rgba(125, 211, 252, 0.34);
 }
+.special-pill.vibe.disturbed {
+  color: rgba(226, 232, 240, 0.94);
+  background: rgba(71, 85, 105, 0.42);
+  border-color: rgba(148, 163, 184, 0.45);
+}
 .special-pill.vibe.muted { opacity: 0.62; }
 [data-theme="light"] .special-pill.vibe {
   color: #075985;
   background: rgba(224, 242, 254, 0.85);
   border-color: rgba(56, 189, 248, 0.38);
+}
+[data-theme="light"] .special-pill.vibe.disturbed {
+  color: #334155;
+  background: rgba(226, 232, 240, 0.9);
+  border-color: rgba(100, 116, 139, 0.42);
+}
+.special-pill.identity {
+  color: rgba(243, 232, 255, 0.94);
+  background: rgba(99, 102, 241, 0.28);
+  border-color: rgba(165, 180, 252, 0.36);
+}
+[data-fish-gender="male"] .special-pill.identity {
+  color: rgba(224, 242, 254, 0.96);
+  background: rgba(14, 165, 233, 0.26);
+  border-color: rgba(125, 211, 252, 0.42);
+}
+[data-fish-gender="female"] .special-pill.identity {
+  color: rgba(252, 231, 243, 0.96);
+  background: rgba(236, 72, 153, 0.24);
+  border-color: rgba(244, 114, 182, 0.4);
+}
+[data-theme="light"] .special-pill.identity {
+  color: #4338ca;
+  background: rgba(238, 242, 255, 0.88);
+  border-color: rgba(129, 140, 248, 0.38);
+}
+[data-theme="light"][data-fish-gender="male"] .special-pill.identity {
+  color: #0369a1;
+  background: rgba(224, 242, 254, 0.88);
+  border-color: rgba(56, 189, 248, 0.42);
+}
+[data-theme="light"][data-fish-gender="female"] .special-pill.identity {
+  color: #9d174d;
+  background: rgba(252, 231, 243, 0.9);
+  border-color: rgba(244, 114, 182, 0.42);
 }
 
 /* ---------- 念头卡片内的小约定 ---------- */
