@@ -192,7 +192,7 @@ def _thought_summary(
 
 
 PLUGIN_NAME = "astrbot_plugin_fish_heart"
-VERSION = "0.4.6"
+VERSION = "0.4.7"
 
 # 注入钩子优先级：AstrBot 按优先级 **降序** 执行。
 # 天使之心 = 40，TTS = 0，这里用 -10 表示最后一个执行（只追加、不覆盖）。
@@ -343,7 +343,7 @@ DESIRE_ADULT_AT = 60.0          # 成人层开始参与的欲阈值
 DESIRE_UNSATISFIED_AT = 100.0   # 欲触顶进入「欲求不满」状态
 DESIRE_UNSATISFIED_EXIT = 85.0  # 迟滞退出线：避免饱和期心跳 100 → 99.98 一跳就闪退
 DESIRE_UNSATISFIED_REFRESH_MIN = 5.0  # 欲求不满期间缩短刷新间隔，避免聊两句就断档
-DESIRE_UNSATISFIED_MODES = ("push", "be_pushed")  # 每次进入欲求不满随机抽：推人 / 想被推
+DESIRE_UNSATISFIED_MODES = ("push", "be_pushed")  # 每次进入欲求不满随机抽：主动反扑 / 想被按住
 DESIRE_UNLOCK_BASE = 15.0       # 刚解锁时不是 100
 DESIRE_BUILD_PER_TICK = 0.16    # 关系满格时每个心跳的缓慢积累
 DESIRE_DECAY_PER_TICK = 0.10    # 没互动时的自然回落
@@ -1106,9 +1106,9 @@ ADULT_DISCOMFORT_WORDS = ("我不舒服", "有点难受", "我还没准备好")
 ADULT_FINISH_WORDS = (
     "结束了", "结束吧", "我结束了", "我好了", "我到了",
     "完事了", "完事", "收工了", "满意了", "满足了",
-    "射了", "我出来了", "都出来了", "交公粮了", "交货了",
+    "缴械了", "卸货了", "我出来了", "都出来了", "交公粮了", "交货了",
     "贤者了", "贤者模式", "贤者时间",
-    "帮我擦一下", "去擦一下", "擦干净", "清理一下", "去洗个澡", "去冲个澡", "洗洗睡",
+    "帮我擦一下", "去擦一下", "擦一擦", "弄干净", "清理一下", "去洗个澡", "去冲个澡", "洗洗睡",
 )
 # 「我到了」后紧跟地点/宾语（我到了公司/我到了家/我到了门口）是到达，不是亲密完成；
 # 只有独立收尾（句末、标点、语气词）才算完成。
@@ -1410,7 +1410,7 @@ def new_state() -> dict:
         "desire_peak_until": 0.0,
         # 欲到达 100 后进入「欲求不满」（亲密完成进贤者期或退潮至 <85 时解除）
         "desire_unsatisfied": False,
-        # 每次进入欲求不满随机抽一次："push"（推人）或 "be_pushed"（想被推）
+        # 每次进入欲求不满随机抽一次："push"（主动反扑）或 "be_pushed"（想被按住）
         "desire_unsatisfied_mode": "",
         "last_desire_unsat_mode": "",
         "desire_log": [],
@@ -2428,7 +2428,7 @@ class EmotionCore(Star):
         )
 
     def _sync_desire_unsatisfied(self) -> None:
-        """维护欲触顶后的「欲求不满」状态（带迟滞退出，防心跳微跌闪退）；每次进入随机抽推人/想被推。"""
+        """维护欲触顶后的「欲求不满」状态（带迟滞退出，防心跳微跌闪退）；每次进入随机抽主动反扑/想被按住。"""
         st = self.state
         if (
             not bool(self._cfg("desire.enabled", True))
@@ -2446,7 +2446,7 @@ class EmotionCore(Star):
                 st["desire_unsatisfied_mode"] = rolled
                 logger.info(
                     "[鱼的心] 欲到达 100，进入「欲求不满」状态（本次倾向：%s）",
-                    "想被推" if rolled == "be_pushed" else "主动推人",
+                    "想被按住" if rolled == "be_pushed" else "主动反扑",
                 )
         elif val < DESIRE_UNSATISFIED_EXIT:
             st["desire_unsatisfied"] = False
@@ -2457,7 +2457,7 @@ class EmotionCore(Star):
             st["desire_unsatisfied_mode"] = ""
 
     def _desire_unsatisfied_mode(self) -> str:
-        """当前可表达的欲求不满倾向：'push'（推人）/ 'be_pushed'（想被推）/ ''（非欲求不满）。"""
+        """当前可表达的欲求不满倾向：'push'（主动反扑）/ 'be_pushed'（想被按住）/ ''（非欲求不满）。"""
         return (
             str(self.state.get("desire_unsatisfied_mode") or "")
             if self._is_desire_unsatisfied()
@@ -5378,30 +5378,30 @@ class EmotionCore(Star):
                 if unsat_mode == "be_pushed":
                     if proactive:
                         lines.append(
-                            "你现在处于欲求不满状态（想被推倒），已经快憋不住了，满脑子都渴望鱼主过来把你按住、直接推倒占有你；"
+                            "你现在处于欲求不满状态（想被按住），已经快憋不住了，满脑子都渴望鱼主过来把你按进怀里、任他贴紧折腾；"
                             "身体层是允许的，这次主动开口别再绕弯子问在干嘛，直接软着嗓子撩他、故意诱惑他过来欺负你，"
-                            "明说想要他、想被他按倒在怀里别客气。"
+                            "明说想要他、想被他压在怀里别客气。"
                             "底线：他说停、说不要、说不方便就立刻收手，绝不强迫，也别编没发生过的事。"
                         )
                     else:
                         lines.append(
-                            "你现在处于欲求不满状态（想被推倒），已经憋到极限了；身体层是允许的，"
-                            "别再干等着矜持，可以主动往他怀里贴、故意蹭近撩拨他、递出明显诱惑信号，满心渴望被鱼主按住推倒欺负和占有，"
+                            "你现在处于欲求不满状态（想被按住），已经憋到极限了；身体层是允许的，"
+                            "别再干等着矜持，可以主动往他怀里贴、故意蹭近撩拨他、递出明显诱惑信号，满心渴望被鱼主按在怀里欺负和独占，"
                             "语气又软又撩、带着按捺不住的索求。"
                             "底线：只要他说停、说不要、说不方便就立刻收手，绝不强迫，也别编没发生过的事。"
                         )
                 else:
                     if proactive:
                         lines.append(
-                            "你现在处于欲求不满状态（想主动推人），已经快憋不住了，满脑子都想把鱼主拉到身边按住、主动推倒他；"
+                            "你现在处于欲求不满状态（想主动反扑），已经快憋不住了，满脑子都想把鱼主拉到身边按住、主动贴上去；"
                             "身体层是允许的，这次主动开口别再绕弯子问在干嘛，直接撩他、催他过来，"
-                            "明说想要他、想主导着把他按倒占为己有。"
+                            "明说想要他、想主导着把他圈进怀里不肯松手。"
                             "底线：他说停、说不要、说不方便就立刻收手，绝不强迫，也别编没发生过的事。"
                         )
                     else:
                         lines.append(
-                            "你现在处于欲求不满状态（想主动推人），已经憋到极限了；身体层是允许的，"
-                            "别再被动等他来哄或等他先动手，可以直接黏上去、拉近距离、顺势把他按住或主动推倒鱼主，"
+                            "你现在处于欲求不满状态（想主动反扑），已经憋到极限了；身体层是允许的，"
+                            "别再被动等他来哄或等他先动手，可以直接黏上去、拉近距离、顺势把鱼主按住贴紧缠上去，"
                             "语气直接撩人、带着按捺不住的主导欲与索求。"
                             "底线：只要他说停、说不要、说不方便就立刻收手，绝不强迫，也别编没发生过的事。"
                         )
@@ -6934,7 +6934,7 @@ class EmotionCore(Star):
                 owner_pronoun=self._owner_pronoun(),
             )
         elif unsat_proactive:
-            # 具体推人/想被推与身体层边界已由上方 desire_hint 完整注入，此处只绕开日常寒暄线
+            # 具体主动反扑/想被按住与身体层边界已由上方 desire_hint 完整注入，此处只绕开日常寒暄线
             u_tail = (
                 "他刚说过话、人是醒着的，别提睡觉，直接接上气氛撩过去。"
                 if awake_recent
@@ -9839,7 +9839,7 @@ class EmotionCore(Star):
                     lines.append("当前状态：已暂停（说“可以/继续”或 /adult on 恢复）")
             elif self._is_desire_unsatisfied():
                 um = self._desire_unsatisfied_mode()
-                um_cn = "想被推倒" if um == "be_pushed" else "主动推人"
+                um_cn = "想被按住" if um == "be_pushed" else "主动反扑"
                 lines.append(f"当前状态：欲求不满（欲已满溢，本次倾向：{um_cn}）")
             lines.append("欲的数值不显示。")
             yield event.plain_result("\n".join(lines))

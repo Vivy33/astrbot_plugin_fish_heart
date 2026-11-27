@@ -17,7 +17,7 @@ desc: |
 
   命令：/心 status、calm、reset、tick、off、on、umo；/adult on、off、done、status
   数据目录：data/plugin_data/astrbot_plugin_fish_heart/
-version: 0.4.6
+version: 0.4.7
 author: Vivy33
 repo: "https://github.com/Vivy33/astrbot_plugin_fish_heart"
 astrbot_version: ">=4.24.2"

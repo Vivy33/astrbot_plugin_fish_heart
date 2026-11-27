@@ -544,8 +544,8 @@
     if (d.desire_unsatisfied) {
       status.push(
         d.desire_unsatisfied_mode === "be_pushed"
-          ? "欲求不满 · 憋不住想被你推倒"
-          : "欲求不满 · 憋不住想推倒你",
+          ? "欲求不满 · 憋不住想被你按住"
+          : "欲求不满 · 憋不住想把你按住",
       );
     }
     if (d.desire_bond_full === false) status.push("关系未满，正在退潮");
