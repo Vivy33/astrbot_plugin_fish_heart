@@ -192,7 +192,7 @@ def _thought_summary(
 
 
 PLUGIN_NAME = "astrbot_plugin_fish_heart"
-VERSION = "0.4.7"
+VERSION = "0.4.8"
 
 # 注入钩子优先级：AstrBot 按优先级 **降序** 执行。
 # 天使之心 = 40，TTS = 0，这里用 -10 表示最后一个执行（只追加、不覆盖）。

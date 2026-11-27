@@ -3,12 +3,12 @@
     "type": "bool",
     "description": "总开关",
     "default": true,
-    "hint": "关闭后不心跳、不注入、不主动说话，已有数据保留。"
+    "hint": "关闭后不心跳、不注入、不主动说话，已有数据保留。下方按「核心 / 玩法 / 进阶 / 排障」顺序分区，实时状态可在「鱼的心」面板查看。"
   },
   "identity": {
     "type": "object",
-    "description": "👤 性别与称谓设定",
-    "hint": "设置鱼与鱼主的性别，自动联动所有心境注入提示词、命令输出与 WebUI 面板里的代词和主题色。默认「女（她）× 男（他）」与旧版完全一致。",
+    "description": "【核心】👤 性别与称谓 · 代词与配色",
+    "hint": "设置鱼与鱼主性别，联动提示词、命令与 Web 面板代词及色调。",
     "items": {
       "fish_gender": {
         "type": "string",
@@ -46,7 +46,8 @@
   },
   "perception": {
     "type": "object",
-    "description": "🫀 情绪感知",
+    "description": "【核心】🫀 情绪感知 · 白名单/夸奖/责怪",
+    "hint": "配置鱼主 QQ 白名单、含蓄夸奖、夸奖听腻与模糊责怪复判。",
     "items": {
       "owner_ids": {
         "description": "谁能影响她的心（QQ 号）",
@@ -88,58 +89,10 @@
       }
     }
   },
-  "group_mode": {
-    "type": "object",
-    "description": "👥 群友模式",
-    "hint": "开关和强度都在这张卡里。开启后群里所有人都算「他」，鱼主按 perception.owner_ids 单独区分；关着时群聊只认名单里的鱼主。对所有群生效，适合「她主要活在群里」的用法。",
-    "items": {
-      "enabled": {
-        "description": "开启群友模式：群里所有人都能影响她",
-        "type": "bool",
-        "default": false,
-        "hint": "开启后，群聊里任何人的话都按「他」处理，能改九维、能哄能气；对所有群生效，适合「她主要活在群里」的用法。关着时按 perception.owner_ids 认人，名单外的群友只加热闹。注意：开了以后群友随口「烦死了」「滚」也会算责怪（关键词过滤仍在），影响多大由下面的强度决定；此时「情绪感知 → 群里别人说话的影响」对群聊不再生效。"
-      },
-      "owner_scale": {
-        "description": "鱼主的正向强度（默认 1.0）",
-        "type": "float",
-        "default": 1.0,
-        "hint": "0.05–2.0：命中 perception.owner_ids 的发送者按这个系数算正向（夸奖、撒娇、哄），默认 1.0 = 私聊强度，也不再乘群聊渠道权重。owner_ids 为空时认不出鱼主，这条不生效（所有人都按群友算）。"
-      },
-      "member_scale": {
-        "description": "群友的正向强度（默认 0.5）",
-        "type": "float",
-        "default": 0.5,
-        "hint": "0.05–1.0：普通群友的好事（夸奖、撒娇、哄）再乘这个系数，默认 0.5 = 打五折。想更难影响她就调小，想接近私聊就调大。"
-      },
-      "member_negative_scale": {
-        "description": "群友的负向强度（默认 0.35）",
-        "type": "float",
-        "default": 0.35,
-        "hint": "0.05–1.5：群里的其他成员被凶 / 被敷衍时用这个系数（默认 0.35）。群友模式是「养在群里」的，单个群友的硬话从 40 心结只到 54（仍是委屈），再一句就可能进生气；想让她更怕就调大。"
-      },
-      "owner_negative_scale": {
-        "description": "鱼主的负向强度（默认 0.5）",
-        "type": "float",
-        "default": 0.5,
-        "hint": "0.05–1.5：命中 owner_ids 的鱼主被凶时的系数（默认 0.5，是私聊的一半）。单个硬话从 40 → 60（生气），但不会直接回避，连续三次才会。想恢复「当众被凶更重」就调大。"
-      },
-      "dm_ratio": {
-        "type": "float",
-        "description": "主动消息改发他私聊的比例（默认 0）",
-        "default": 0.0,
-        "hint": "0–1，只在群友模式生效。0 = 主动消息只发群；0.3 = 三成主动消息改发他私聊；1 = 全部发私聊。私聊目标按顺序找：下面的 dm_umo → 他最近一次私聊用的会话 → 群平台 + owner_ids 里唯一的那个 QQ；找不到（没配 owner_ids、或配了多个人分不清）就回落到群里，绝不发给群友。私聊发不出去时也会自动改发群里，不会白丢一轮。"
-      },
-      "dm_umo": {
-        "type": "string",
-        "description": "私聊他的会话（可选）",
-        "default": "",
-        "hint": "留空就自动找：优先他最近一次私聊用的会话，其次用群平台 + owner_ids 里唯一的那个 QQ 拼。填了必须是一对一私聊的 UMO（platform:FriendMessage:QQ），填成群会话会被忽略。只在 dm_ratio > 0 时用到。"
-      }
-    }
-  },
   "proactive": {
     "type": "object",
-    "description": "💬 主动说话",
+    "description": "【核心】💬 主动说话 · UMO/冷却/固定时段",
+    "hint": "设置主动发消息目标会话 UMO、冷却、日限与睡前兜底或固定时段。",
     "items": {
       "enabled": {
         "type": "bool",
@@ -249,13 +202,14 @@
   },
   "sleep": {
     "type": "object",
-    "description": "🌙 作息",
-    "hint": "她每天按固定时间睡觉；睡着时你发消息，她会被吵醒并按九维当时的状态回你（困就短、压力高就冲、依恋高就嘴上嫌烦但还是回）。睡着时她不会主动说话。若作息时间内被反复吵醒（总计 3–4 次 / ≥5 次），次日醒来会抬升疲惫并投射到今日小气象（阴天·没睡好 / 小雨·困倦低气压），鱼主吵醒 ≥5 次次日还会进入「委屈」档，且谁吵脾气对着谁、双向不迁怒。开启作息后，每日收益、主动次数、睡前兜底、「想你」限频和每日小气象统一按起床时间切新的一天（凌晨未睡不提前重置）；关闭作息时退回自然日 00:00。生日与纪念日始终按真实日历计算。",
+    "description": "【核心】🌙 作息 · 切日/熬夜失眠/吵醒",
+    "hint": "固定入睡与起床时间、熬夜失眠闭环、吵醒影响与作息切日。",
     "items": {
       "enabled": {
         "type": "bool",
         "description": "启用作息",
-        "default": true
+        "default": true,
+        "hint": "她每天按固定时间睡觉；睡着时你发消息，她会被吵醒并按九维当时的状态回你（困就短、压力高就冲、依恋高就嘴上嫌烦但还是回）。睡着时她不会主动说话。若作息时间内被反复吵醒（总计 3–4 次 / ≥5 次），次日醒来会抬升疲惫并投射到今日小气象（阴天·没睡好 / 小雨·困倦低气压），鱼主吵醒 ≥5 次次日还会进入「委屈」档，且谁吵脾气对着谁、双向不迁怒。开启作息后，每日收益、主动次数、睡前兜底、「想你」限频和每日小气象统一按起床时间切新的一天（凌晨未睡不提前重置）；关闭作息时退回自然日 00:00。生日与纪念日始终按真实日历计算。"
       },
       "bedtime": {
         "type": "string",
@@ -277,40 +231,152 @@
       }
     }
   },
-  "shut": {
+  "group_mode": {
     "type": "object",
-    "description": "🤐 回避档（已读不回）",
-    "hint": "只在她进入「回避」档（责怪 ≥ 80）时生效。回不回按阶梯走：前 5 条必不回 → 第 6 条 50% → 第 7 条起必回。这 7 条会全记住，等她开口时先归纳再回。",
+    "description": "【核心】👥 群友模式 · 全群互动与私聊分流",
+    "hint": "开启后全群均可影响她，独立调节鱼主/群友正负权重与私聊分流。",
     "items": {
       "enabled": {
+        "description": "开启群友模式：群里所有人都能影响她",
         "type": "bool",
-        "description": "允许她已读不回",
-        "default": true,
-        "hint": "关掉后她进回避档也照常回话，只是语气冷（少说、不讨好、不追问）。阶梯是写死的，想改请改代码里的 SHUT_REPLY_LADDER。"
+        "default": false,
+        "hint": "开启后，群聊里任何人的话都按「他」处理，能改九维、能哄能气；对所有群生效，适合「她主要活在群里」的用法。关着时按 perception.owner_ids 认人，名单外的群友只加热闹。注意：开了以后群友随口「烦死了」「滚」也会算责怪（关键词过滤仍在），影响多大由下面的强度决定；此时「情绪感知 → 群里别人说话的影响」对群聊不再生效。"
+      },
+      "owner_scale": {
+        "description": "鱼主的正向强度（默认 1.0）",
+        "type": "float",
+        "default": 1.0,
+        "hint": "0.05–2.0：命中 perception.owner_ids 的发送者按这个系数算正向（夸奖、撒娇、哄），默认 1.0 = 私聊强度，也不再乘群聊渠道权重。owner_ids 为空时认不出鱼主，这条不生效（所有人都按群友算）。"
+      },
+      "member_scale": {
+        "description": "群友的正向强度（默认 0.5）",
+        "type": "float",
+        "default": 0.5,
+        "hint": "0.05–1.0：普通群友的好事（夸奖、撒娇、哄）再乘这个系数，默认 0.5 = 打五折。想更难影响她就调小，想接近私聊就调大。"
+      },
+      "member_negative_scale": {
+        "description": "群友的负向强度（默认 0.35）",
+        "type": "float",
+        "default": 0.35,
+        "hint": "0.05–1.5：群里的其他成员被凶 / 被敷衍时用这个系数（默认 0.35）。群友模式是「养在群里」的，单个群友的硬话从 40 心结只到 54（仍是委屈），再一句就可能进生气；想让她更怕就调大。"
+      },
+      "owner_negative_scale": {
+        "description": "鱼主的负向强度（默认 0.5）",
+        "type": "float",
+        "default": 0.5,
+        "hint": "0.05–1.5：命中 owner_ids 的鱼主被凶时的系数（默认 0.5，是私聊的一半）。单个硬话从 40 → 60（生气），但不会直接回避，连续三次才会。想恢复「当众被凶更重」就调大。"
+      },
+      "dm_ratio": {
+        "type": "float",
+        "description": "主动消息改发他私聊的比例（默认 0）",
+        "default": 0.0,
+        "hint": "0–1，只在群友模式生效。0 = 主动消息只发群；0.3 = 三成主动消息改发他私聊；1 = 全部发私聊。私聊目标按顺序找：下面的 dm_umo → 他最近一次私聊用的会话 → 群平台 + owner_ids 里唯一的那个 QQ；找不到（没配 owner_ids、或配了多个人分不清）就回落到群里，绝不发给群友。私聊发不出去时也会自动改发群里，不会白丢一轮。"
+      },
+      "dm_umo": {
+        "type": "string",
+        "description": "私聊他的会话（可选）",
+        "default": "",
+        "hint": "留空就自动找：优先他最近一次私聊用的会话，其次用群平台 + owner_ids 里唯一的那个 QQ 拼。填了必须是一对一私聊的 UMO（platform:FriendMessage:QQ），填成群会话会被忽略。只在 dm_ratio > 0 时用到。"
       }
     }
   },
-  "channel": {
+  "special_days": {
     "type": "object",
-    "description": "⚖️ 渠道权重（私聊 vs 群聊）",
+    "description": "【玩法】🎂 特别的日子 · 生日与纪念日",
+    "hint": "记录鱼主/鱼生日、相识纪念日与自定义特别日，提前惦记并主动祝福。",
     "items": {
-      "group_base_weight": {
-        "type": "float",
-        "description": "群里说话的基础权重",
-        "default": 0.35,
-        "hint": "私聊固定 1.0。实际值还随「距上次私聊时长」衰减：<6h ×1.0、<24h ×0.7、<72h ×0.45、≥72h ×0.25。"
+      "enabled": {
+        "type": "bool",
+        "description": "启用生日与纪念日",
+        "default": true,
+        "hint": "打开后，她会记住你们的生日、相识纪念日和自定义特别日，提前悄悄惦记并在当天给出情绪反应与专属祝福；全留空时零影响、零消耗。"
       },
-      "negative_multiplier": {
-        "type": "float",
-        "description": "负向事件在群里的倍率",
-        "default": 1.2,
-        "hint": "非群友模式的群聊里，被凶 / 被敷衍的倍率（默认 1.2，当众被凶比私聊重）。群友模式不走这一项：普通群友用 group_mode.member_negative_scale（默认 0.35），鱼主用 group_mode.owner_negative_scale（默认 0.5）。"
+      "owner_birthday": {
+        "type": "string",
+        "description": "鱼主生日",
+        "default": "",
+        "hint": "填 MM-DD 或 YYYY-MM-DD（如 08-15 或 2004-08-15）；留空表示不设置。"
+      },
+      "fish_birthday": {
+        "type": "string",
+        "description": "鱼的生日",
+        "default": "",
+        "hint": "填 MM-DD 或 YYYY-MM-DD（如 03-21）；当天她会悄悄等你记起来，不会自己讨祝福。"
+      },
+      "met_date": {
+        "type": "string",
+        "description": "相识 / 在一起纪念日",
+        "default": "",
+        "hint": "填 YYYY-MM-DD（如 2025-05-20）会自动算相识第几天、周年日和整百/520天纪念；只填 MM-DD 则按每年纪念日算。"
+      },
+      "custom": {
+        "type": "list",
+        "description": "自定义特别日",
+        "default": [],
+        "hint": "每条写「日期 名称」，如 10-01 第一次见面 或 2026-06-07 高考；也可以在聊天里用 /心 纪念日 add 随时增删。"
+      },
+      "preheat_days": {
+        "type": "int",
+        "description": "提前惦记天数",
+        "default": 3,
+        "hint": "提前几天开始在心里悄悄惦记（0 = 只在当天反应，不提前预热）。"
+      },
+      "proactive_wish": {
+        "type": "bool",
+        "description": "当天主动发专属祝福",
+        "default": true,
+        "hint": "鱼主生日、纪念日或自定义特别日当天，在允许主动开口的时段内自动发一条专属祝福（鱼自己的生日不主动发，留给你记起来）。"
+      }
+    }
+  },
+  "daily_vibe": {
+    "type": "object",
+    "description": "【玩法】🌤 每日小气象 · 心情与吵醒底色",
+    "hint": "每日醒来抽取心情底色；昨夜反复吵醒次日自动投射阴天/小雨。",
+    "items": {
+      "enabled": {
+        "type": "bool",
+        "description": "启用每日小气象",
+        "default": true,
+        "hint": "每天醒来按当前状态轻度加权掷一个当日心情底色（晴朗/微风/小云/微凉/薄雾/星火），微调说话味道；若昨夜作息时间内被反复吵醒，次日会自动投射为睡眠受扰专属气象（总计 3–4 次 → 阴天·没睡好，≥5 次 → 小雨·困倦低气压，鱼主吵醒 ≥5 次同步进委屈档；双向不迁怒，谁吵脾气对着谁）。常规底色在生气/回避/压力≥60/疲惫≥70 时自动隐身，睡眠受扰气象放宽至压力≥65/疲惫≥85 且委屈档正常显示；发 /心 气象 换 可手动换回常规底色，0 额外后台消耗。"
+      }
+    }
+  },
+  "promises": {
+    "type": "object",
+    "description": "【玩法】🤝 小约定 · 自动记承诺与兑现",
+    "hint": "私聊自动记住近期小承诺，过一阵轻提并在兑现后结算。",
+    "items": {
+      "enabled": {
+        "type": "bool",
+        "description": "启用小约定",
+        "default": true,
+        "hint": "记住你亲口说过的近期小承诺，过一阵顺嘴轻提，兑现后开心结算；最多挂几条且到期自动淡掉，不与记忆插件冲突。"
+      },
+      "auto_capture": {
+        "type": "bool",
+        "description": "私聊自动捕捉明确承诺",
+        "default": true,
+        "hint": "打开后，私聊里说「我答应你…」「说好了…」「周末带你去…」等明确承诺时自动记下（自动过滤问句与否定句）；关掉后只通过 /心 约定 add 手动记。"
+      },
+      "max_active": {
+        "type": "int",
+        "description": "最多同时挂念几条",
+        "default": 3,
+        "hint": "默认 3 条，超出时由新约定顶掉最旧的一条，保持轻巧不唠叨。"
+      },
+      "expire_days": {
+        "type": "int",
+        "description": "未兑现自动淡掉天数",
+        "default": 14,
+        "hint": "超过这么多天没兑现就自然放下，不再记挂（默认 14 天）。"
       }
     }
   },
   "thought": {
     "type": "object",
-    "description": "💭 念头",
+    "description": "【玩法】💭 念头 · 心跳小惦记与开口加成",
+    "hint": "控制心跳生成念头的概率、门槛、主动开口加成与完成冷却。",
     "items": {
       "enabled": {
         "type": "bool",
@@ -344,45 +410,10 @@
       }
     }
   },
-  "tick": {
-    "type": "object",
-    "description": "💓 心跳",
-    "items": {
-      "base_interval_minutes": {
-        "type": "int",
-        "description": "常规心跳间隔（分钟）",
-        "default": 45
-      },
-      "min_interval_minutes": {
-        "type": "int",
-        "description": "最短心跳间隔（分钟）",
-        "default": 15,
-        "hint": "压力 / 责怪越高心跳越快，下限由此决定。"
-      }
-    }
-  },
-  "inject": {
-    "type": "object",
-    "description": "🧠 心境注入",
-    "items": {
-      "enabled": {
-        "type": "bool",
-        "description": "把心境写进本轮请求",
-        "default": true,
-        "hint": "固定最后执行，只追加到本轮用户消息末尾，不覆盖记忆插件与 TTS 的内容，也不会打断前缀缓存。"
-      },
-      "min_gap_minutes": {
-        "type": "int",
-        "description": "两次注入的最小间隔（分钟）",
-        "default": 20,
-        "hint": "只压制「同一档位内」的数值漂移。跨档（平静→委屈→害怕→回避）一定立刻注入，不受这条限制——否则她会不知道自己已经在生气。他直接问「你是不是委屈了/怎么了/生气」时也会强制注入一次。"
-      }
-    }
-  },
   "desire": {
     "type": "object",
-    "description": "🔥 隐藏的欲",
-    "hint": "面板只保留启用开关和成人向总开关；阈值、持续时间、同意有效期等高级项已隐藏，可在配置 JSON 里修改。",
+    "description": "【玩法】🔥 隐藏的欲 · 满格解锁与成人层",
+    "hint": "仅显示启用开关与成人向总开关；阈值/贤者期等高级项隐藏在配置 JSON。",
     "items": {
       "enabled": {
         "type": "bool",
@@ -517,100 +548,23 @@
       }
     }
   },
-  "special_days": {
+  "shut": {
     "type": "object",
-    "description": "🎂 特别的日子（生日与纪念日）",
+    "description": "【进阶】🤐 回避档 · 责怪满档已读不回",
+    "hint": "责怪 ≥ 80 时是否按阶梯已读不回（前 5 必不回、第 7 起必回）。",
     "items": {
       "enabled": {
         "type": "bool",
-        "description": "启用生日与纪念日",
+        "description": "允许她已读不回",
         "default": true,
-        "hint": "打开后，她会记住你们的生日、相识纪念日和自定义特别日，提前悄悄惦记并在当天给出情绪反应与专属祝福；全留空时零影响、零消耗。"
-      },
-      "owner_birthday": {
-        "type": "string",
-        "description": "鱼主生日",
-        "default": "",
-        "hint": "填 MM-DD 或 YYYY-MM-DD（如 08-15 或 2004-08-15）；留空表示不设置。"
-      },
-      "fish_birthday": {
-        "type": "string",
-        "description": "鱼的生日",
-        "default": "",
-        "hint": "填 MM-DD 或 YYYY-MM-DD（如 03-21）；当天她会悄悄等你记起来，不会自己讨祝福。"
-      },
-      "met_date": {
-        "type": "string",
-        "description": "相识 / 在一起纪念日",
-        "default": "",
-        "hint": "填 YYYY-MM-DD（如 2025-05-20）会自动算相识第几天、周年日和整百/520天纪念；只填 MM-DD 则按每年纪念日算。"
-      },
-      "custom": {
-        "type": "list",
-        "description": "自定义特别日",
-        "default": [],
-        "hint": "每条写「日期 名称」，如 10-01 第一次见面 或 2026-06-07 高考；也可以在聊天里用 /心 纪念日 add 随时增删。"
-      },
-      "preheat_days": {
-        "type": "int",
-        "description": "提前惦记天数",
-        "default": 3,
-        "hint": "提前几天开始在心里悄悄惦记（0 = 只在当天反应，不提前预热）。"
-      },
-      "proactive_wish": {
-        "type": "bool",
-        "description": "当天主动发专属祝福",
-        "default": true,
-        "hint": "鱼主生日、纪念日或自定义特别日当天，在允许主动开口的时段内自动发一条专属祝福（鱼自己的生日不主动发，留给你记起来）。"
-      }
-    }
-  },
-  "daily_vibe": {
-    "type": "object",
-    "description": "🌤 每日小气象（心情底色）",
-    "items": {
-      "enabled": {
-        "type": "bool",
-        "description": "启用每日小气象",
-        "default": true,
-        "hint": "每天醒来按当前状态轻度加权掷一个当日心情底色（晴朗/微风/小云/微凉/薄雾/星火），微调说话味道；若昨夜作息时间内被反复吵醒，次日会自动投射为睡眠受扰专属气象（总计 3–4 次 → 阴天·没睡好，≥5 次 → 小雨·困倦低气压，鱼主吵醒 ≥5 次同步进委屈档；双向不迁怒，谁吵脾气对着谁）。常规底色在生气/回避/压力≥60/疲惫≥70 时自动隐身，睡眠受扰气象放宽至压力≥65/疲惫≥85 且委屈档正常显示；发 /心 气象 换 可手动换回常规底色，0 额外后台消耗。"
-      }
-    }
-  },
-  "promises": {
-    "type": "object",
-    "description": "🤝 小约定（短期承诺挂念）",
-    "items": {
-      "enabled": {
-        "type": "bool",
-        "description": "启用小约定",
-        "default": true,
-        "hint": "记住你亲口说过的近期小承诺，过一阵顺嘴轻提，兑现后开心结算；最多挂几条且到期自动淡掉，不与记忆插件冲突。"
-      },
-      "auto_capture": {
-        "type": "bool",
-        "description": "私聊自动捕捉明确承诺",
-        "default": true,
-        "hint": "打开后，私聊里说「我答应你…」「说好了…」「周末带你去…」等明确承诺时自动记下（自动过滤问句与否定句）；关掉后只通过 /心 约定 add 手动记。"
-      },
-      "max_active": {
-        "type": "int",
-        "description": "最多同时挂念几条",
-        "default": 3,
-        "hint": "默认 3 条，超出时由新约定顶掉最旧的一条，保持轻巧不唠叨。"
-      },
-      "expire_days": {
-        "type": "int",
-        "description": "未兑现自动淡掉天数",
-        "default": 14,
-        "hint": "超过这么多天没兑现就自然放下，不再记挂（默认 14 天）。"
+        "hint": "关掉后她进回避档也照常回话，只是语气冷（少说、不讨好、不追问）。阶梯是写死的，想改请改代码里的 SHUT_REPLY_LADDER。"
       }
     }
   },
   "tuning": {
     "type": "object",
-    "description": "⚙️ 进阶调优（情绪节奏）",
-    "hint": "按倍率微调她的情绪节奏，默认全部为 1.0（原版配平）；只有觉得「太容易累 / 养太慢 / 太容易生气」时再改，不动则与原版完全一致。",
+    "description": "【进阶】⚙️ 进阶调优 · 情绪节奏倍率",
+    "hint": "按倍率微调疲惫上涨、恢复速度、依恋亲密升温与生气敏感度。",
     "items": {
       "fatigue_scale": {
         "type": "float",
@@ -638,15 +592,66 @@
       }
     }
   },
-  "debug": {
-    "type": "bool",
-    "description": "调试日志",
-    "default": false,
-    "hint": "打开后每次心跳 / 注入 / 主动说话都写一条日志。"
+  "channel": {
+    "type": "object",
+    "description": "【进阶】⚖️ 渠道权重 · 私聊与群聊比例",
+    "hint": "调节非群友模式下群聊基础权重与当众负向倍率。",
+    "items": {
+      "group_base_weight": {
+        "type": "float",
+        "description": "群里说话的基础权重",
+        "default": 0.35,
+        "hint": "私聊固定 1.0。实际值还随「距上次私聊时长」衰减：<6h ×1.0、<24h ×0.7、<72h ×0.45、≥72h ×0.25。"
+      },
+      "negative_multiplier": {
+        "type": "float",
+        "description": "负向事件在群里的倍率",
+        "default": 1.2,
+        "hint": "非群友模式的群聊里，被凶 / 被敷衍的倍率（默认 1.2，当众被凶比私聊重）。群友模式不走这一项：普通群友用 group_mode.member_negative_scale（默认 0.35），鱼主用 group_mode.owner_negative_scale（默认 0.5）。"
+      }
+    }
+  },
+  "tick": {
+    "type": "object",
+    "description": "【进阶】💓 心跳 · 常规与最短间隔",
+    "hint": "控制常规心跳与高压/责怪加速后的最短心跳间隔。",
+    "items": {
+      "base_interval_minutes": {
+        "type": "int",
+        "description": "常规心跳间隔（分钟）",
+        "default": 45
+      },
+      "min_interval_minutes": {
+        "type": "int",
+        "description": "最短心跳间隔（分钟）",
+        "default": 15,
+        "hint": "压力 / 责怪越高心跳越快，下限由此决定。"
+      }
+    }
+  },
+  "inject": {
+    "type": "object",
+    "description": "【进阶】🧠 心境注入 · 注入开关与间隔",
+    "hint": "控制临时心境注入开关及同档位最小刷新间隔。",
+    "items": {
+      "enabled": {
+        "type": "bool",
+        "description": "把心境写进本轮请求",
+        "default": true,
+        "hint": "固定最后执行，只追加到本轮用户消息末尾，不覆盖记忆插件与 TTS 的内容，也不会打断前缀缓存。"
+      },
+      "min_gap_minutes": {
+        "type": "int",
+        "description": "两次注入的最小间隔（分钟）",
+        "default": 20,
+        "hint": "只压制「同一档位内」的数值漂移。跨档（平静→委屈→害怕→回避）一定立刻注入，不受这条限制——否则她会不知道自己已经在生气。他直接问「你是不是委屈了/怎么了/生气」时也会强制注入一次。"
+      }
+    }
   },
   "diagnostics": {
     "type": "object",
-    "description": "🧾 影响日志",
+    "description": "【排障】🧾 影响日志 · 记录每句情绪变化",
+    "hint": "按条记录消息对九维与档位的详细影响（含原文，默认关闭）。",
     "items": {
       "log_affect": {
         "type": "bool",
@@ -655,5 +660,11 @@
         "hint": "打开后，每收到一条消息都会写一条 [鱼的心][影响] 日志：原文、私聊/群聊、发言人、识别到的事件、实际增量、变化前后的九维/责怪/期待/档位/心情；没有触发事件的也会记。含聊天原文，注意隐私，默认关闭。"
       }
     }
+  },
+  "debug": {
+    "type": "bool",
+    "description": "调试日志",
+    "default": false,
+    "hint": "打开后每次心跳 / 注入 / 主动说话都写一条日志。"
   }
 }
