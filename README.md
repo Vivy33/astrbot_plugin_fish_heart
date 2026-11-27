@@ -376,8 +376,30 @@ AstrBot 4.x 插件 · 纯标准库 · 零第三方依赖 · 平台 `aiocqhttp`�
 | `window_end` | `"22:00"` | 固定时间段结束时间（窗口外硬拦截所有主动开口含开机补发，窗口结束前 30 分钟内若当日未开口则保底试一次） |
 | `catch_up_on_start` | `true` | 开机补发错过的主动消息（同样遵守冷却/日限/作息/回避） |
 | `target_umo` | 空 | 发往哪个会话；必须是 `platform:MessageType:session_id` 三段 |
+| `memory_bridge` | `false` | 开启主动消息记忆桥接（默认关闭，不改变现有行为） |
+| `memory_plugins` | `[]` | 允许调用的记忆插件名白名单，例如 `["astrbot_plugin_livingmemory"]` |
+| `memory_timeout` | `2.5` | 记忆桥接超时（秒，clamp `0.5–10.0`）；不在配置页显示 |
 
 > 另包含 5 个默认已配平的隐藏调优项（`topic_variety`、`miss_daily_max`、`company`、`deep`、`segment_reply`），不在配置页展开显示，确有需要可在配置 JSON 的 `proactive` 下修改。
+
+### 主动消息记忆桥接（可选）
+
+开启 `proactive.memory_bridge` 并在 `proactive.memory_plugins` 里填上插件名后，fish_heart 会在
+生成主动消息前按白名单调一次 `fish_heart_recall(umo, query, limit=5)`，发送成功、
+写回对话历史并保存状态后调 `fish_heart_remember(umo, text, ts=None)`。两个方法都由记忆插件实现，
+缺哪个就跳过哪个：
+
+```python
+async def fish_heart_recall(self, umo: str, query: str, limit: int = 5) -> str: ...
+async def fish_heart_remember(self, umo: str, text: str, ts: float | None = None) -> bool: ...
+```
+
+- 只调用白名单插件，不广播 `on_llm_request` / `on_llm_response`；
+- `query` 用最近 3–5 条真实聊天，不传主动消息的内部写作规则；
+- 生气型主动（`KIND_ANGRY`）不注入长期记忆；
+- 同步/异步方法都支持，异步带超时；异常只降级，不阻塞主动消息；
+- 状态先落盘再调外部插件，记忆插件超时不会拖住状态写入；
+- 默认关闭，关闭时行为与现在完全一致。
 
 ### 进阶调优（情绪节奏）`tuning`
 
